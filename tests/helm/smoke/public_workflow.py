@@ -403,6 +403,11 @@ async def runtime_diagnostics(run_id: str, sha: str) -> dict[str, Any]:
                 "diagnosticOnly": True,
                 "runtimeStatus": state.runtime_status.name,
                 "failureType": error_type,
+                "historyCapability": (
+                    "available-not-queried"
+                    if callable(getattr(client, "get_workflow_history", None))
+                    else "unsupported-client-api"
+                ),
                 "failureLocations": failure_locations(
                     ""
                     if details is None
@@ -749,6 +754,7 @@ def collect_failure_diagnostics(output: Path, sha: str) -> None:
         "lifecycleProofFailed": True,
         "publicStartRejections": public_start_diagnostics(),
         "serviceLogs": {},
+        "causalFailures": [],
         "terminalRuns": [],
         "collectionErrors": [],
     }
@@ -789,7 +795,12 @@ def collect_failure_diagnostics(output: Path, sha: str) -> None:
                 ]
             )
             report["serviceLogs"][container] = failure_locations(logs)
-        except RuntimeError as exc:
+            report["causalFailures"].extend(
+                resume_failure_records(
+                    logs, {record["runId"] for record in report["terminalRuns"]}
+                )
+            )
+        except (RuntimeError, TypeError, ValueError) as exc:
             report["collectionErrors"].append(
                 {"source": container, "errorType": type(exc).__name__}
             )
@@ -806,6 +817,116 @@ def collect_failure_diagnostics(output: Path, sha: str) -> None:
         json.dumps(report, indent=2)
     )
     print(json.dumps(report), flush=True)
+
+
+def resume_failure_records(logs: str, candidates: set[str]) -> list[dict[str, Any]]:
+    """Extract only candidate-correlated, bounded source failures using the closed diagnostic schema."""
+    records: list[dict[str, Any]] = []
+    prefix = "WORKFLOW_RESUME_FAILURE "
+    for line in logs.splitlines():
+        if prefix not in line:
+            continue
+        record, _ = json.JSONDecoder().raw_decode(line.split(prefix, 1)[1])
+        if not isinstance(record, dict):
+            raise TypeError("resume failure diagnostic must be an object")
+        if record.get("runId") not in candidates:
+            continue
+        if (
+            record.get("operation")
+            not in {"persist", "register", "ack", "wait", "cancel", "delete", "unknown"}
+            or record.get("phase") not in {"activity", "retry", "driver", "unhandled"}
+            or not isinstance(record.get("stepId"), str)
+            or re.fullmatch(r"[A-Za-z0-9_-]{1,100}", record["stepId"]) is None
+            or not isinstance(record.get("errorType"), str)
+            or re.fullmatch(r"[A-Za-z0-9_-]{1,100}", record["errorType"]) is None
+            or (
+                record.get("attempt") is not None
+                and (
+                    type(record["attempt"]) is not int
+                    or not 1 <= record["attempt"] <= 10000
+                )
+            )
+            or record.get("kind")
+            not in {
+                None,
+                "workflow.client.transport",
+                "workflow.client.status",
+                "workflow.client.decode",
+                "workflow.client.cancelled",
+            }
+            or (
+                record.get("taskId") is not None
+                and (
+                    type(record["taskId"]) is not int
+                    or not 0 <= record["taskId"] <= 100000
+                )
+            )
+            or (
+                record.get("httpStatus") is not None
+                and (
+                    type(record["httpStatus"]) is not int
+                    or not 100 <= record["httpStatus"] <= 599
+                )
+            )
+            or record.get("grpcStatus")
+            not in {
+                None,
+                "OK",
+                "CANCELLED",
+                "UNKNOWN",
+                "INVALID_ARGUMENT",
+                "DEADLINE_EXCEEDED",
+                "NOT_FOUND",
+                "ALREADY_EXISTS",
+                "PERMISSION_DENIED",
+                "RESOURCE_EXHAUSTED",
+                "FAILED_PRECONDITION",
+                "ABORTED",
+                "OUT_OF_RANGE",
+                "UNIMPLEMENTED",
+                "INTERNAL",
+                "UNAVAILABLE",
+                "DATA_LOSS",
+                "UNAUTHENTICATED",
+            }
+            or not isinstance(record.get("frames"), list)
+            or len(record["frames"]) > 5
+        ):
+            raise ValueError("resume failure diagnostic has invalid fields")
+        frames = []
+        for frame in record["frames"]:
+            if (
+                not isinstance(frame, dict)
+                or not isinstance(frame.get("file"), str)
+                or re.fullmatch(r"[A-Za-z0-9_-]{1,100}\.py", frame["file"]) is None
+                or not isinstance(frame.get("function"), str)
+                or re.fullmatch(r"[A-Za-z0-9_-]{1,100}", frame["function"]) is None
+                or type(frame.get("line")) is not int
+                or frame["line"] < 1
+            ):
+                raise ValueError("resume failure source frame is invalid")
+            frames.append({key: frame[key] for key in ("file", "function", "line")})
+        records.append(
+            {
+                key: record.get(key)
+                for key in (
+                    "runId",
+                    "stepId",
+                    "operation",
+                    "phase",
+                    "attempt",
+                    "taskId",
+                    "errorType",
+                    "kind",
+                    "httpStatus",
+                    "grpcStatus",
+                )
+            }
+            | {"frames": frames}
+        )
+        if len(records) > 100:
+            raise ValueError("too many resume failure diagnostics")
+    return records
 
 
 def run(output: Path, values: Path) -> None:

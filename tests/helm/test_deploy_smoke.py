@@ -695,6 +695,17 @@ def test_failed_public_job_reports_only_payload_free_rejection_locations(
         "status": "failed",
         "token": "private-candidate-payload",
     }
+    causal = {
+        "runId": run_id,
+        "stepId": "await-cancellation",
+        "operation": "register",
+        "phase": "activity",
+        "errorType": "OutboundRpcStatusError",
+        "kind": "workflow.client.status",
+        "httpStatus": 403,
+        "frames": [{"file": "trigger.py", "function": "register", "line": 10}],
+        "message": "private-message",
+    }
     inspected: list[list[str]] = []
 
     def command(args: list[str]) -> str:
@@ -707,6 +718,8 @@ def test_failed_public_job_reports_only_payload_free_rejection_locations(
             + diagnostic
             + '\n  File "/app/runner.py", line 42, in execute\n'
             + "TypeError: private-tail"
+            + "\nWORKFLOW_RESUME_FAILURE "
+            + json.dumps(causal)
         )
 
     def probe(service: str, phase: str, candidate: str, sha: str) -> dict[str, Any]:
@@ -735,6 +748,8 @@ def test_failed_public_job_reports_only_payload_free_rejection_locations(
         {"file": "runner.py", "line": 42, "function": "execute"}
     ]
     assert len(inspected) == 4
+    assert report["causalFailures"][0]["operation"] == "register"
+    assert report["causalFailures"][0]["httpStatus"] == 403
     assert "private" not in captured
     assert (
         json.loads((tmp_path / "public-workflow-diagnostics.json").read_text())
@@ -776,7 +791,7 @@ def test_runtime_diagnostic_excludes_payloads_and_failure_messages(
     """Fetch only metadata and keep stack locations/type, excluding exception values and raw paths."""
     from dapr.ext import workflow
 
-    client = Mock()
+    client = Mock(spec=workflow.DaprWorkflowClient)
     client.get_workflow_state.return_value = SimpleNamespace(
         runtime_status=SimpleNamespace(name="FAILED"),
         failure_details=SimpleNamespace(
@@ -793,10 +808,55 @@ def test_runtime_diagnostic_excludes_payloads_and_failure_messages(
     client.close.assert_called_once_with()
     assert result["runtimeStatus"] == "FAILED"
     assert result["failureType"] == "TypeError"
+    assert result["historyCapability"] == "unsupported-client-api"
     assert result["failureLocations"]["frames"] == [
         {"file": "worker.py", "line": 123, "function": "run"}
     ]
     assert "private" not in json.dumps(result)
+
+
+def test_resume_causal_records_are_correlated_and_allowlisted() -> None:
+    """Retain only the candidate's typed status/source record, not extra remote/private fields."""
+    run_id = "00000000-0000-5000-8000-000000000000"
+    record = {
+        "runId": run_id,
+        "stepId": "await-cancellation",
+        "operation": "register",
+        "phase": "activity",
+        "attempt": None,
+        "errorType": "OutboundRpcStatusError",
+        "kind": "workflow.client.status",
+        "httpStatus": 403,
+        "grpcStatus": None,
+        "frames": [
+            {
+                "file": "trigger.py",
+                "function": "register",
+                "line": 10,
+                "token": "private-frame",
+            }
+        ],
+        "message": "private-error",
+        "code": "private-code",
+    }
+    unrelated = {**record, "runId": "unrelated"}
+    logs = "\n".join(
+        "WARNING WORKFLOW_RESUME_FAILURE " + json.dumps(row)
+        for row in (unrelated, record)
+    )
+    captured = public.resume_failure_records(logs, {run_id})
+    assert len(captured) == 1
+    assert captured[0]["operation"] == "register"
+    assert captured[0]["httpStatus"] == 403
+    assert captured[0]["frames"] == [
+        {"file": "trigger.py", "function": "register", "line": 10}
+    ]
+    assert "private" not in json.dumps(captured)
+    record["httpStatus"] = "private-status"
+    with pytest.raises(ValueError, match="invalid fields"):
+        public.resume_failure_records(
+            "WORKFLOW_RESUME_FAILURE " + json.dumps(record), {run_id}
+        )
 
 
 def test_private_proof_executes_only_in_an_actual_ready_tested_container(
