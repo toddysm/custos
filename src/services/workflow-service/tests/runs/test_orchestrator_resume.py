@@ -21,12 +21,21 @@ through an injected :class:`WaitForStepHandler` inline, mirroring the
 from __future__ import annotations
 
 import asyncio
+import json
+import logging
+import runpy
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any, cast
+from unittest.mock import Mock
 
 import pytest
+from custos_callctx.execution import ExecutionIdentity
 from custos_cel import SchemaBindings, parse, type_check
 
-from custos_workflow.document import LetStep, WaitForStep
+from custos_workflow.bindings import ActivityTypeRegistry
+from custos_workflow.compiler import RunMeta, compile
+from custos_workflow.document import LetStep, WaitForStep, WorkflowDocument
 from custos_workflow.graph import (
     CallSiteKind,
     ExecutionGraph,
@@ -44,7 +53,7 @@ from custos_workflow.runs import (
     make_run_orchestrator,
 )
 from custos_workflow.runs.orchestrator import WORKFLOW_NAME
-from custos_workflow.runs.step_handler import StepResult, StepSucceeded
+from custos_workflow.runs.step_handler import NoopStepHandler, StepResult, StepSucceeded
 from custos_workflow.runtime import (
     FakeWorkflowClient,
     FakeWorkflowRuntime,
@@ -61,6 +70,105 @@ _SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {"key": {"type": "string"}},
 }
+
+
+@pytest.mark.parametrize("already_aware", [False, True])
+def test_actual_sdk_wait_persists_deterministic_utc_mirror(
+    already_aware: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Real SDK history reaches persist/replay with exact TTL and immutable pin, without RPC."""
+    from dapr.ext.workflow import DaprWorkflowContext
+    from dapr.ext.workflow._durabletask import task
+    from dapr.ext.workflow._durabletask.internal import helpers
+    from dapr.ext.workflow._durabletask.worker import (
+        _OrchestrationExecutor,
+        _Registry,
+        _RuntimeOrchestrationContext,
+    )
+
+    smoke = runpy.run_path(str(Path(__file__).parents[5] / "tests/helm/smoke/public_workflow.py"))
+    document = WorkflowDocument.model_validate(smoke["waiting_workflow_document"]())
+    now = datetime(2026, 11, 21, 12, 0, tzinfo=UTC)
+    identity = ExecutionIdentity("workspace-default", "synthetic-principal", "synthetic-binding")
+    graph = compile(
+        document,
+        RunMeta("workspace-default", "synthetic-version", "private-cancellation-proof", "1", now),
+        Mock(spec=ActivityTypeRegistry),
+    )
+    run_input = RunInput(
+        workspace_id="workspace-default",
+        workflow_version_id="synthetic-version",
+        compiled_graph_json=to_json(graph),
+        inputs={},
+        delivery_protocol=3,
+        execution_identity=identity,
+    )
+    orchestrator = make_run_orchestrator(NoopStepHandler(), resume_handler=_resume_handler())
+    replay_observations: list[bool] = []
+
+    def entry(inner: task.OrchestrationContext, payload: Any) -> Any:
+        """Wrap real naive history time; the aware variant changes only the wrapper's awareness."""
+        context = DaprWorkflowContext(inner)
+        assert context.current_utc_datetime.tzinfo is None
+        if already_aware:
+            assert isinstance(inner, _RuntimeOrchestrationContext)
+            inner.current_utc_datetime = inner.current_utc_datetime.replace(tzinfo=UTC)
+        replay_observations.append(context.is_replaying)
+        return orchestrator(context, payload)
+
+    insecure = Mock(side_effect=AssertionError("SDK regression forbids RPC"))
+    secure = Mock(side_effect=AssertionError("SDK regression forbids RPC"))
+    monkeypatch.setattr("grpc.insecure_channel", insecure)
+    monkeypatch.setattr("grpc.secure_channel", secure)
+    registry = _Registry()  # type: ignore[no-untyped-call]
+    registry.add_named_orchestrator(WORKFLOW_NAME, entry)
+    executor = _OrchestrationExecutor(registry, logging.getLogger(__name__))
+    run_id = "00000000-0000-5000-8000-000000000000"
+    events = [
+        helpers.new_workflow_started_event(now),
+        helpers.new_execution_started_event(WORKFLOW_NAME, run_id, json.dumps(run_input.to_dict())),
+    ]
+    result = executor.execute(run_id, [], events)
+    assert not any(action.HasField("completeWorkflow") for action in result.actions)
+    scheduled = [action for action in result.actions if action.HasField("scheduleTask")]
+    assert len(scheduled) == 1
+    first = scheduled[0]
+    body = json.loads(first.scheduleTask.input.value)
+    assert body["operation"] == "persist"
+    mirror = body["mirror"]
+    registered = datetime.fromisoformat(mirror["registeredAt"])
+    expires = datetime.fromisoformat(mirror["expiresAt"])
+    assert registered == now and registered.tzinfo is not None
+    assert (expires - registered).total_seconds() == 300
+    assert mirror["executionIdentity"] == identity.to_dict()
+    assert (mirror["runId"], mirror["stepId"], mirror["eventKey"]) == (
+        run_id,
+        "await-cancellation",
+        "never-sent",
+    )
+    replay = executor.execute(
+        run_id,
+        [
+            *events,
+            helpers.new_task_scheduled_event(
+                first.id, first.scheduleTask.name, first.scheduleTask.input.value
+            ),
+        ],
+        [
+            helpers.new_workflow_started_event(now),
+            helpers.new_task_completed_event(first.id, json.dumps(mirror)),
+        ],
+    )
+    assert not any(action.HasField("completeWorkflow") for action in replay.actions)
+    registration = [action for action in replay.actions if action.HasField("scheduleTask")]
+    assert len(registration) == 1
+    request = json.loads(registration[0].scheduleTask.input.value)
+    assert request["operation"] == "register"
+    assert request["request"]["executionIdentity"] == identity.to_dict()
+    assert request["request"]["ttl"] == "PT5M"
+    assert replay_observations == [False, True]
+    insecure.assert_not_called()
+    secure.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

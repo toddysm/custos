@@ -168,6 +168,9 @@ def test_create_app_honours_env_flag_production(
 ) -> None:
     """``WF_REQUIRE_CALL_CONTEXT=1`` → production-mode middleware."""
     os.environ["WF_REQUIRE_CALL_CONTEXT"] = "1"
+    os.environ["WF_AUTHZ_ENDPOINT"] = "http://auth"
+    os.environ["APP_API_TOKEN"] = "unit-sidecar-token"
+    os.environ["WF_GATEWAY_NAMESPACE"] = "custos"
     app = create_app(run_components=fake_run_components)
     with TestClient(app) as client:
         # /healthz still passes — probes are bypassed even in production mode.
@@ -182,7 +185,67 @@ def test_create_app_honours_env_flag_production(
     )
     # Starlette stores the kwargs on the wrapper's ``kwargs`` mapping.
     assert installed.kwargs["require_call_context"] is True
+    assert installed.kwargs["call_context_verifier"] is not None
     assert installed.kwargs["execution_verifier"] is None
+
+
+@pytest.mark.parametrize("missing", ["WF_AUTHZ_ENDPOINT", "APP_API_TOKEN", "WF_GATEWAY_NAMESPACE"])
+def test_public_production_configuration_fails_closed(
+    missing: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No production flag combination can restore unsigned identity with incomplete trust."""
+    for name, value in {
+        "ENVIRONMENT": "production",
+        "WF_AUTHZ_ENDPOINT": "http://auth",
+        "APP_API_TOKEN": "unit-sidecar-token",
+        "WF_GATEWAY_NAMESPACE": "custos",
+    }.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.delenv(missing)
+    with pytest.raises(ValueError, match="public call context requires"):
+        create_app(require_call_context=False)
+
+
+@pytest.mark.parametrize("value", ["yes", "1", "invalid"])
+def test_public_execution_flag_rejects_non_boolean_configuration(
+    _clean_env: None, monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    """Public execution cannot activate or fall back on ambiguous operator configuration."""
+    monkeypatch.setenv("WF_PUBLIC_EXECUTION_ENABLED", value)
+    with pytest.raises(ValueError, match="WF_PUBLIC_EXECUTION_ENABLED"):
+        create_app()
+
+
+def test_public_execution_requires_signed_context_and_execution_registry(
+    _clean_env: None,
+) -> None:
+    """The public-start opt-in alone cannot silently use a legacy or ambient identity."""
+    with pytest.raises(ValueError, match="public execution requires"):
+        create_app(public_execution_enabled=True)
+
+
+def test_public_execution_requires_durable_start_at_activation(
+    _clean_env: None, fake_run_components: RunComponents
+) -> None:
+    """Fail lifespan explicitly before readiness when an enabled starter lacks durable storage."""
+    from custos_callctx import CallContextVerifier
+    from custos_callctx.execution import ExecutionBindings
+
+    app = create_app(
+        public_execution_enabled=True,
+        run_components=fake_run_components,
+        call_context_verifier=CallContextVerifier(jwks_url="http://auth/.well-known/jwks.json"),
+        execution_bindings=ExecutionBindings((), {}),
+        app_api_token="unit-sidecar-token",
+        gateway_namespace="custos",
+        trigger_namespace="custos",
+    )
+    with (
+        pytest.raises(ValueError, match="public execution requires durable delivery"),
+        TestClient(app),
+    ):
+        pass
 
 
 def test_create_app_env_flag_only_truthy_on_exact_1(_clean_env: None) -> None:
@@ -495,6 +558,9 @@ def test_create_app_is_import_side_effect_free_with_production_env(
     """
     os.environ["WF_REQUIRE_CALL_CONTEXT"] = "1"
     os.environ["WF_DAPR_WORKFLOW_COMPONENT"] = "wf-component"
+    os.environ["WF_AUTHZ_ENDPOINT"] = "http://auth"
+    os.environ["APP_API_TOKEN"] = "unit-sidecar-token"
+    os.environ["WF_GATEWAY_NAMESPACE"] = "custos"
     app = create_app()
     # The factory returned a configured app object with no app.state.ready set,
     # confirming the lifespan has not yet been entered.

@@ -6,7 +6,12 @@ import time
 import httpx
 import pytest
 
-from custos_callctx.execution import ExecutionBinding, ExecutionBindings, ExecutionIdentity
+from custos_callctx.execution import (
+    ExecutionBinding,
+    ExecutionBindings,
+    ExecutionIdentity,
+    ExecutionOperation,
+)
 from custos_callctx.execution_client import ExecutionAuthorizationError, ExecutionContextClient
 
 IDENTITY = ExecutionIdentity("ws", "account", "stable")
@@ -15,7 +20,10 @@ BINDINGS = ExecutionBindings(
 )
 
 
-async def test_every_request_resolves_rotated_credentials_and_a_fresh_context() -> None:
+@pytest.mark.parametrize("operation", ["connector-bind", "workflow-cancel"])
+async def test_every_request_resolves_rotated_credentials_and_a_fresh_context(
+    operation: ExecutionOperation,
+) -> None:
     """Neither credential material nor issued contexts are cached in the stable registry."""
     seen: list[dict[str, str]] = []
     generation = 0
@@ -42,13 +50,13 @@ async def test_every_request_resolves_rotated_credentials_and_a_fresh_context() 
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
         client = ExecutionContextClient(http, BINDINGS, api_token="unit-sidecar-api")
         for index in (1, 2):
-            headers = await client.headers(IDENTITY, "connector-bind")
+            headers = await client.headers(IDENTITY, operation)
             assert headers["x-custos-callctx"] == f"e30.context-{index}.signature"
             assert seen[-1] == {
                 "token": f"synthetic-credential-{index}",
                 "workspaceId": "ws",
                 "principalId": "account",
-                "operation": "connector-bind",
+                "operation": operation,
             }
     assert set(IDENTITY.to_dict()) == {"workspaceId", "principalId", "bindingId"}
 

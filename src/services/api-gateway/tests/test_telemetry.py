@@ -53,9 +53,9 @@ from custos_gateway.routes._forwarding import response_snapshot  # noqa: E402
 from custos_gateway.routes.registry import registry_required_permissions  # noqa: E402
 from custos_gateway.settings import Settings  # noqa: E402
 
-WRITE_PATH = "/v1/workspaces/ws-1/runs"
+WRITE_PATH = "/v1/workspaces/ws-1/runs/run-1:cancel"
 #: The FastAPI route template the registry mounts (the ``http.route`` value).
-WRITE_ROUTE = "/v1/workspaces/{workspaceId}/runs"
+WRITE_ROUTE = "/v1/workspaces/{workspaceId}/runs/{runId}:cancel"
 AUTH_HEADERS = {"authorization": "Bearer token-123"}
 
 

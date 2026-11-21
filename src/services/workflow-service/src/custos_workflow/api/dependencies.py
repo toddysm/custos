@@ -25,10 +25,9 @@ Three accessor families ship here:
 
 * :func:`get_call_context` — returns the
   :class:`~custos_workflow.call_context.CallContext` the middleware
-  attached to ``request.state``. The middleware short-circuits with
-  a 401 envelope before this dependency is reached in production
-  mode, so reaching the body means the context is guaranteed to be
-  populated.
+  attached to ``request.state``. Production authentication and route-scope
+  failures stop before this dependency, so a protected handler receives
+  verified identity.
 
 * :func:`workspace_path` — a ``Path(...)`` parameter dependency that
   pulls the ``{ws}`` URL segment with a length floor. Routers
@@ -199,9 +198,8 @@ def get_validator(request: Request) -> StartRunValidator:
 def get_call_context(request: Request) -> CallContext:
     """Return the :class:`CallContext` :mod:`call_context` middleware attached.
 
-    The middleware short-circuits requests in production mode
-    (``WF_REQUIRE_CALL_CONTEXT=1``) with a 401 envelope before any
-    route runs, so reaching this accessor means the context is
+    The middleware rejects invalid production authentication and scope before
+    any protected route runs, so reaching this accessor means the context is
     guaranteed to exist. In dev mode the middleware still attaches
     a :class:`CallContext` with ``None`` fields so the downstream
     route does not have to special-case absence.

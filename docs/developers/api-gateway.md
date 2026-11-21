@@ -172,6 +172,22 @@ The reservation has four outcomes:
 Read requests never engage idempotency. The record TTL is governed by
 `CUSTOS_GATEWAY_IDEMPOTENCY_TTL` (default 24h).
 
+**Workflow start exception:** `POST /v1/workspaces/{workspaceId}/runs` uses
+Workflow's durable acceptance instead of Gateway response snapshots or an
+in-flight409. Gateway trims keys consistently with Workflow, chooses a nonempty
+body `idempotencyKey` ahead of the header, and forwards the effective key.
+Blank body keys fall back to the header; with neither nonempty key, Gateway
+generates no hidden key and Workflow retains UUIDv4 behavior. Identical keyed
+retries after scheduling failure or a lost response reach authoritative
+Workflow recovery (keyed UUIDv5), with a bounded70-second downstream read timeout.
+Gateway binds only the scoped route for these keys and delegates payload
+equivalence/conflicts to Workflow: equivalent JSON serialization, trimmed keys
+and moving a key between body and header cannot create a premature Gateway409.
+Configured binding-store failures remain503; without a Gateway store, Workflow
+still owns durable acceptance. Other ordinary writes retain the table above.
+Workflow reports unavailable or invalid upstream Catalog responses as503,
+not as accepted-work409 conflicts. Denied execution-grant exchanges remain403.
+
 ---
 
 ## Rate limiting
@@ -298,7 +314,7 @@ A representative slice of the run-lifecycle routes (Workflow Service):
 
 | Method | Path | Permission | Idempotency key | Rate class |
 |---|---|---|---|---|
-| `POST` | `/v1/workspaces/{workspaceId}/runs` | `workflow:execute` | required | write |
+| `POST` | `/v1/workspaces/{workspaceId}/runs` | `workflow:execute` | optional, Workflow-owned | write |
 | `GET` | `/v1/workspaces/{workspaceId}/runs` | `run:read` | — | read |
 | `GET` | `/v1/workspaces/{workspaceId}/runs/{runId}` | `run:read` | — | read |
 | `POST` | `/v1/workspaces/{workspaceId}/runs/{runId}:cancel` | `run:cancel` | required | write |

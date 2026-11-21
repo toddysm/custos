@@ -28,6 +28,8 @@ global:
     # Pause new scheduled/poll/webhook admission without removing identity,
     # shared storage, queued callbacks or private runtime infrastructure.
     admissionEnabled: false
+    # Caller-bound public starts require separately provisioned caller bindings.
+    publicExecutionEnabled: false
     deploymentId: ""
     databaseSecret: custos-app
     apiTokenSecret: ""

@@ -11,11 +11,10 @@ four routes:
 Each route is a thin orchestration: lift the path workspace through
 :func:`~custos_workflow.api.dependencies.workspace_path`, resolve
 collaborators off ``app.state`` via the WF-IMPL-064 dependency
-factories, then call the
-:class:`~custos_workflow.validator.StartRunValidator` (where the
-verb mutates) and the
-:class:`~custos_workflow.runs.controller.RunController` in sequence
-and translate the result into a wire model.
+factories, then translate the result into a wire model. Opted-in public starts
+use :class:`~custos_workflow.runs.public_start.PublicRunStarter` for validation
+and immutable durable acceptance. Reads, cancellation and legacy development
+starts use :class:`~custos_workflow.runs.controller.RunController`.
 
 The error taxonomy is intentionally untouched here: every locked
 error class (run + validator) already has an exception handler
@@ -34,15 +33,13 @@ the issue acceptance criteria pin: "body-field idempotencyKey
 overrides header"). An empty-string body field is treated as
 "not supplied" so callers can opt out by sending ``""``.
 
-The validator's :class:`~custos_workflow.validator.ValidatedStartRun`
-result carries the normalised key + inputs + fingerprint; we pass
-the normalised values straight into
-:meth:`~custos_workflow.runs.controller.RunController.start_run`
-so the controller observes the same fingerprint the validator
-recorded in the ledger. The controller's own dedup gate is the
-second line of defence — the API surface trusts the validator's
-output but the controller still owns its contract for non-API
-callers (the Internal RPC surface that lands in WF-IMPL-067).
+The caller-bound starter validates fresh requests and passes the validated
+Workflow version and inputs directly to durable acceptance. Accepted keyed
+replays retain their original identity and immutable input without consulting
+mutable Catalog state. The legacy development path still passes the validator's
+normalised key, inputs and fingerprint into
+:meth:`~custos_workflow.runs.controller.RunController.start_run`, whose own dedup
+gate remains a second line of defence for those callers.
 
 List filtering
 --------------
@@ -82,8 +79,10 @@ from custos_workflow.api.models import (
 )
 from custos_workflow.call_context import CallContext
 from custos_workflow.runs.controller import RunController, RunRef
+from custos_workflow.runs.errors import WorkflowRuntimeUnavailableError
 from custos_workflow.runs.ids import RunId
 from custos_workflow.runs.model import RunRecord, RunStatus
+from custos_workflow.runs.public_start import PublicRunStarter
 from custos_workflow.validator import StartRunValidator
 
 __all__ = ["ref_response_from_ref", "resolve_idempotency_key", "router"]
@@ -197,15 +196,27 @@ async def start_run(
     """Validate then start a workflow run.
 
     Returns ``202 Accepted`` with the caller-facing
-    :class:`RunRefResponse` handle. The controller's idempotency
-    gate guarantees a replayed ``StartRun`` against an existing
-    ledger entry returns the original ``runId`` without scheduling
-    a second workflow instance.
+    :class:`RunRefResponse` handle. Caller-bound starts persist immutable
+    protocol3 inputs and recover accepted keyed requests without selecting new
+    authority. Enforced starts fail with503 while disabled or not ready;
+    only the development path uses the legacy controller below.
     """
     effective_key = resolve_idempotency_key(
         body_key=body.idempotency_key,
         header_key=idempotency_key_header,
     )
+    starter = getattr(request.app.state, "public_run_starter", None)
+    if isinstance(starter, PublicRunStarter):
+        ref, replayed = await starter.start(
+            ws, body.workflow_version_id, body.inputs, effective_key, ctx
+        )
+        request.state.wf_workflow_version_id = ref.workflow_version_id
+        request.state.wf_run_id = ref.run_id
+        if effective_key is not None:
+            request.state.wf_idempotency_outcome = "replay" if replayed else "fresh"
+        return ref_response_from_ref(ref)
+    if starter is not None or getattr(request.app.state, "public_execution_required", False):
+        raise WorkflowRuntimeUnavailableError("public execution is disabled or not ready")
     validated = await validator.validate_start_run(
         workspace_id=ws,
         workflow_version_id=body.workflow_version_id,
