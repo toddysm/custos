@@ -27,6 +27,7 @@ from custos_spl.ids import WorkspaceId
 from custos_spl.interfaces.delivery import MAX_DELIVERY_RETENTION_SECONDS, WorkflowStart
 
 from custos_workflow.call_context import CallContext
+from custos_workflow.clients._errors import OutboundRpcError, OutboundRpcStatusError
 from custos_workflow.runs.controller import RunRef
 from custos_workflow.runs.errors import RunStateConflictError, WorkflowRuntimeUnavailableError
 from custos_workflow.runs.ids import derive_run_id
@@ -100,7 +101,8 @@ class PublicRunStarter:
         Keyless calls keep a newly generated UUIDv4 per request. Keyed calls
         reuse the locked workspace/key UUIDv5 and reject divergent accepted
         identity or payload. Only non-secret references enter runtime history.
-        Conflict diagnostics contain only the run ID, exception type and source location.
+        Upstream RPC faults are unavailable, not accepted-work conflicts. Diagnostics
+        contain only the run ID, exception type, source location and HTTP status.
         """
         if (
             context.workspace != workspace
@@ -143,12 +145,17 @@ class PublicRunStarter:
         except (ImmutableViolation, ValueError, RunStateConflictError) as exc:
             origin = traceback.extract_tb(exc.__traceback__)[-1]
             logger.warning(
-                "PUBLIC_START_REJECTED run=%s cause=%s origin=%s:%d",
+                "PUBLIC_START_REJECTED run=%s cause=%s origin=%s:%d status=%s",
                 run_id,
                 type(exc).__name__,
                 origin.name,
                 origin.lineno,
+                exc.status_code if isinstance(exc, OutboundRpcStatusError) else None,
             )
+            if isinstance(exc, OutboundRpcError):
+                raise WorkflowRuntimeUnavailableError(
+                    "public execution Catalog is unavailable"
+                ) from None
             if isinstance(exc, RunStateConflictError):
                 raise
             raise RunStateConflictError("public start conflicts with accepted work") from None

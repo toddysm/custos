@@ -57,7 +57,7 @@ def waiting_workflow_document() -> dict[str, Any]:
 
 
 async def seed() -> None:
-    """Use production PostgreSQL adapters for a definition and expiring workspace-only grant."""
+    """Seed grants and definitions using their separate native-JSON and serialized-JSON contracts."""
     from datetime import UTC, datetime, timedelta
 
     from custos_auth.roles import ROLE_WORKSPACE_OPERATOR
@@ -123,14 +123,18 @@ async def seed() -> None:
                     revoked_reason=None,
                 )
             )
-        definitions = PgDefinitionAdapter(lazy=pool)
+    finally:
+        await pool.aclose()
+    definition_pool = LazyPool(dsn)
+    try:
+        definitions = PgDefinitionAdapter(lazy=definition_pool)
         for name, document in (
             (WORKFLOW, workflow_document()),
             (WAITING_WORKFLOW, waiting_workflow_document()),
         ):
             await definitions.put_workflow_version(WORKSPACE, name, "1", document)
     finally:
-        await pool.aclose()
+        await definition_pool.aclose()
     print("Synthetic definition and workspace-only public operator seeded.", flush=True)
 
 
@@ -663,7 +667,8 @@ def public_start_diagnostics() -> list[str]:
     )
     return re.findall(
         r"\bPUBLIC_START_REJECTED run=[0-9a-f-]{36} "
-        r"cause=[A-Za-z_][A-Za-z0-9_]* origin=[A-Za-z_<>][A-Za-z0-9_<>]*:[0-9]+",
+        r"cause=[A-Za-z_][A-Za-z0-9_]* origin=[A-Za-z_<>][A-Za-z0-9_<>]*:[0-9]+"
+        r"(?: status=(?:[1-5][0-9]{2}|None))?",
         logs,
     )
 

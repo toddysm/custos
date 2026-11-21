@@ -32,6 +32,11 @@ from custos_workflow.call_context import (
     CallContext,
     CallContextMiddleware,
 )
+from custos_workflow.clients._errors import (
+    OutboundRpcDecodeError,
+    OutboundRpcStatusError,
+    OutboundRpcTransportError,
+)
 from custos_workflow.clients.trigger import FakeTriggerServiceClient
 from custos_workflow.document import WorkflowDocument
 from custos_workflow.providers import RunComponents
@@ -407,27 +412,39 @@ def test_public_start_keyless_requests_keep_distinct_uuid4_ids(
     assert len(catalog.calls) == 2
 
 
-@pytest.mark.parametrize("error_type", [ValueError, RunStateConflictError])
-def test_public_start_conflict_logs_only_its_source(
+@pytest.mark.parametrize(
+    "error,status",
+    [
+        (ValueError("private-start-value"), 409),
+        (RunStateConflictError("private-start-value"), 409),
+        (OutboundRpcStatusError("private-start-value", status_code=503), 503),
+        (OutboundRpcTransportError("private-start-value"), 503),
+        (OutboundRpcDecodeError("private-start-value"), 503),
+    ],
+)
+def test_public_start_failure_logs_only_its_source(
     caller_start: tuple[TestClient, Ed25519PrivateKey, RunComponents, _CallerCatalog],
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
-    error_type: type[ValueError] | type[RunStateConflictError],
+    error: ValueError | RunStateConflictError,
+    status: int,
 ) -> None:
-    """A rejected start keeps its HTTP semantics without logging the rejected value or message."""
+    """Upstream faults are unavailable; conflicts stay409 and neither logs private values."""
     client, key, components, _ = caller_start
 
     async def reject(request: ScheduleWorkflowRequest) -> str:
-        """Model a domain conflict or invalid backend value containing private diagnostic data."""
-        raise error_type("private-start-value")
+        """Model a conflict or dependency fault containing private diagnostic data."""
+        raise error
 
     monkeypatch.setattr(components.workflow_client, "schedule_new_workflow", reject)
     response = _start_public(client, key)
-    assert response.status_code == 409
+    assert response.status_code == status
     assert (
         f"PUBLIC_START_REJECTED run={derive_run_id('ws', 'public-key')} "
-        f"cause={error_type.__name__} origin=reject:"
+        f"cause={type(error).__name__} origin=reject:"
     ) in caplog.text
+    if isinstance(error, OutboundRpcStatusError):
+        assert "status=503" in caplog.text
     assert "private-start-value" not in caplog.text
 
 

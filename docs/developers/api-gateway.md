@@ -185,6 +185,8 @@ equivalence/conflicts to Workflow: equivalent JSON serialization, trimmed keys
 and moving a key between body and header cannot create a premature Gateway409.
 Configured binding-store failures remain503; without a Gateway store, Workflow
 still owns durable acceptance. Other ordinary writes retain the table above.
+Workflow reports unavailable or invalid upstream Catalog responses as503,
+not as accepted-work409 conflicts. Denied execution-grant exchanges remain403.
 
 ---
 

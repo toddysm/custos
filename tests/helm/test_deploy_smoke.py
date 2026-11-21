@@ -686,7 +686,7 @@ def test_failed_public_job_reports_only_payload_free_rejection_locations(
 
     diagnostic = (
         "PUBLIC_START_REJECTED run=00000000-0000-5000-8000-000000000000 "
-        "cause=ValueError origin=reject:123"
+        "cause=OutboundRpcStatusError origin=reject:123 status=503"
     )
 
     def command(args: list[str]) -> str:
