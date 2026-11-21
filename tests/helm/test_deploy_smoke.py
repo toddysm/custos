@@ -669,7 +669,7 @@ def test_failed_public_job_reports_only_payload_free_rejection_locations(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Job failure stays fatal and produces no success artifact or arbitrary service-log output."""
+    """Failed candidate state and ready-service logs are retained without payloads or success evidence."""
     monkeypatch.setenv("NS", "custos-system")
     monkeypatch.setenv("GITHUB_SHA", TAG)
     monkeypatch.setenv("IMAGE_PREFIX", "localhost:5001/custos")
@@ -688,30 +688,115 @@ def test_failed_public_job_reports_only_payload_free_rejection_locations(
         "PUBLIC_START_REJECTED run=00000000-0000-5000-8000-000000000000 "
         "cause=OutboundRpcStatusError origin=reject:123 status=503"
     )
+    run_id = "00000000-0000-5000-8000-000000000000"
+    terminal = {
+        "sha": TAG,
+        "runId": run_id,
+        "status": "failed",
+        "token": "private-candidate-payload",
+    }
+    inspected: list[list[str]] = []
 
     def command(args: list[str]) -> str:
-        """Expose mixed service output without permitting it to become evidence or diagnostics."""
-        assert args == [
-            "kubectl",
-            "-n",
-            "custos-system",
-            "logs",
-            "deployment/custos-workflow-service",
-            "-c",
+        """Expose ready-service and client logs with private data that must not leave the collector."""
+        inspected.append(args)
+        if "job/" + public.RESOURCE in args:
+            return str(public.DIAGNOSTIC_PREFIX) + json.dumps(terminal)
+        return (
+            "unrelated-private-value\nWARNING "
+            + diagnostic
+            + '\n  File "/app/runner.py", line 42, in execute\n'
+            + "TypeError: private-tail"
+        )
+
+    def probe(service: str, phase: str, candidate: str, sha: str) -> dict[str, Any]:
+        """Return the sanitized runtime diagnostic from the exact Workflow container."""
+        assert (service, phase, candidate, sha) == (
             "workflow-service",
-            "--tail=100",
-        ]
-        return "unrelated-private-value\nWARNING " + diagnostic + "\nprivate-tail"
+            "diagnose",
+            run_id,
+            TAG,
+        )
+        return {"sha": TAG, "runId": run_id, "runtimeStatus": "FAILED"}
 
     monkeypatch.setitem(public.run.__globals__, "wait_job", wait)
+    monkeypatch.setitem(public.run.__globals__, "service_probe", probe)
     monkeypatch.setitem(sys.modules, "runtime", SimpleNamespace(command=command))
     output = tmp_path / "evidence.json"
     with pytest.raises(RuntimeError, match="public Job failed"):
         public.run(output, tmp_path / "values.yaml")
-    assert json.loads(capsys.readouterr().out) == {
-        "publicStartRejections": [diagnostic]
-    }
+    captured = capsys.readouterr().out
+    report = json.loads(captured)
+    assert report["publicStartRejections"] == [diagnostic]
+    assert report["terminalRuns"][0]["status"] == "failed"
+    assert report["terminalRuns"][0]["runtime"]["runtimeStatus"] == "FAILED"
+    assert set(report["serviceLogs"]) == {"workflow-service", "daprd"}
+    assert report["serviceLogs"]["workflow-service"]["frames"] == [
+        {"file": "runner.py", "line": 42, "function": "execute"}
+    ]
+    assert len(inspected) == 4
+    assert "private" not in captured
+    assert (
+        json.loads((tmp_path / "public-workflow-diagnostics.json").read_text())
+        == report
+    )
     assert not output.exists()
+
+
+def test_terminal_candidate_logs_only_identity_and_status(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An early terminal observation emits a correlation record, never the public response body."""
+    monkeypatch.setenv("GITHUB_SHA", TAG)
+    run_id = "00000000-0000-5000-8000-000000000000"
+    responses = iter(
+        [
+            {"runId": run_id},
+            {"status": "failed", "inputs": {"token": "private-input"}},
+        ]
+    )
+    monkeypatch.setitem(
+        public.start_waiting_run.__globals__, "request", lambda *args: next(responses)
+    )
+    with pytest.raises(RuntimeError, match="terminated before"):
+        public.start_waiting_run()
+    captured = capsys.readouterr().out
+    assert (
+        captured
+        == public.DIAGNOSTIC_PREFIX
+        + json.dumps({"sha": TAG, "runId": run_id, "status": "failed"})
+        + "\n"
+    )
+    assert "private-input" not in captured
+
+
+def test_runtime_diagnostic_excludes_payloads_and_failure_messages(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fetch only metadata and keep stack locations/type, excluding exception values and raw paths."""
+    from dapr.ext import workflow
+
+    client = Mock()
+    client.get_workflow_state.return_value = SimpleNamespace(
+        runtime_status=SimpleNamespace(name="FAILED"),
+        failure_details=SimpleNamespace(
+            error_type="TypeError",
+            message="private-error-message",
+            stack_trace='  File "/private/worker.py", line 123, in run\nTypeError: private-value',
+        ),
+        serialized_input="private-input",
+        serialized_output="private-output",
+    )
+    monkeypatch.setattr(workflow, "DaprWorkflowClient", lambda: client)
+    result = asyncio.run(public.runtime_diagnostics("root", TAG))
+    client.get_workflow_state.assert_called_once_with("root", fetch_payloads=False)
+    client.close.assert_called_once_with()
+    assert result["runtimeStatus"] == "FAILED"
+    assert result["failureType"] == "TypeError"
+    assert result["failureLocations"]["frames"] == [
+        {"file": "worker.py", "line": 123, "function": "run"}
+    ]
+    assert "private" not in json.dumps(result)
 
 
 def test_private_proof_executes_only_in_an_actual_ready_tested_container(

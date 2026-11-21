@@ -298,6 +298,7 @@ jobs:
           path: |
             ${{ runner.temp }}/runtime-evidence.json
             ${{ runner.temp }}/public-workflow-evidence.json
+            ${{ runner.temp }}/public-workflow-diagnostics.json
           if-no-files-found: warn
 
       - name: Diagnostics on failure

@@ -31,6 +31,7 @@ OPERATOR = "public-context-operator"
 RESOURCE = "smoke-public-workflow"
 EXECUTION_RESOURCE = RESOURCE + "-execution"
 REPORT_PREFIX = "PUBLIC_WORKFLOW_EVIDENCE "
+DIAGNOSTIC_PREFIX = "PUBLIC_WORKFLOW_TERMINAL "
 
 
 def workflow_document() -> dict[str, Any]:
@@ -249,6 +250,17 @@ def start_waiting_run() -> str:
         if observed.get("status") == "running":
             return run_id
         if observed.get("status") in {"succeeded", "failed", "cancelled"}:
+            print(
+                DIAGNOSTIC_PREFIX
+                + json.dumps(
+                    {
+                        "sha": os.environ["GITHUB_SHA"],
+                        "runId": run_id,
+                        "status": observed["status"],
+                    }
+                ),
+                flush=True,
+            )
             raise RuntimeError(
                 "cancellable Workflow terminated before the private proof"
             )
@@ -346,6 +358,59 @@ async def runtime_termination(run_id: str, sha: str) -> dict[str, Any]:
     finally:
         await client.aclose()
     return {"sha": sha, "runId": run_id, "runtimeTerminationVerified": True}
+
+
+def failure_locations(text: str) -> dict[str, Any]:
+    """Keep bounded Python source frames and exception names, never messages or payloads."""
+    frames = re.findall(
+        r'File "[^"\n]*/([A-Za-z_][A-Za-z0-9_]*\.py)", line ([0-9]+), '
+        r"in ([A-Za-z_<>][A-Za-z0-9_<>]*)",
+        text.replace("\\n", "\n").replace('\\"', '"'),
+    )
+    return {
+        "frames": [
+            {"file": file, "line": int(line), "function": function}
+            for file, line, function in frames[-30:]
+        ],
+        "exceptionTypes": sorted(
+            set(re.findall(r"\b[A-Za-z_][A-Za-z0-9_]*(?:Error|Exception)\b", text))
+        )[:30],
+    }
+
+
+async def runtime_diagnostics(run_id: str, sha: str) -> dict[str, Any]:
+    """Read payload-free failure state through the deployed SDK, retaining sanitized stack frames."""
+    from dapr.ext.workflow import DaprWorkflowClient
+
+    client = DaprWorkflowClient()
+    try:
+        async with asyncio.timeout(60):
+            state = await asyncio.to_thread(
+                client.get_workflow_state, run_id, fetch_payloads=False
+            )
+            if state is None:
+                raise RuntimeError("diagnostic runtime instance was not found")
+            details = state.failure_details
+            error_type = None if details is None else details.error_type
+            if (
+                error_type is not None
+                and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.]{0,100}", error_type) is None
+            ):
+                error_type = "unrecognized"
+            return {
+                "sha": sha,
+                "runId": run_id,
+                "diagnosticOnly": True,
+                "runtimeStatus": state.runtime_status.name,
+                "failureType": error_type,
+                "failureLocations": failure_locations(
+                    ""
+                    if details is None
+                    else (details.stack_trace or "") + "\n" + details.message
+                ),
+            }
+    finally:
+        await asyncio.to_thread(client.close)
 
 
 def client_job(
@@ -673,6 +738,76 @@ def public_start_diagnostics() -> list[str]:
     )
 
 
+def collect_failure_diagnostics(output: Path, sha: str) -> None:
+    """Persist failure-only evidence from ready services too; collection errors remain explicit."""
+    import runtime as smoke
+
+    namespace = os.environ["NS"]
+    report: dict[str, Any] = {
+        "sha": sha,
+        "diagnosticOnly": True,
+        "lifecycleProofFailed": True,
+        "publicStartRejections": public_start_diagnostics(),
+        "serviceLogs": {},
+        "terminalRuns": [],
+        "collectionErrors": [],
+    }
+    logs = smoke.command(["kubectl", "-n", namespace, "logs", "job/" + RESOURCE])
+    for line in logs.splitlines():
+        if not line.startswith(DIAGNOSTIC_PREFIX):
+            continue
+        record = json.loads(line.removeprefix(DIAGNOSTIC_PREFIX))
+        if (
+            not isinstance(record, dict)
+            or record.get("sha") != sha
+            or not isinstance(record.get("runId"), str)
+            or re.fullmatch(
+                r"[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}",
+                record["runId"],
+            )
+            is None
+            or record.get("status") not in {"succeeded", "failed", "cancelled"}
+        ):
+            raise ValueError("terminal diagnostic identity is invalid or stale")
+        report["terminalRuns"].append(
+            {"runId": record["runId"], "status": record["status"]}
+        )
+    if len(report["terminalRuns"]) > 1:
+        raise ValueError("only one cancellation candidate diagnostic is permitted")
+    for container in ("workflow-service", "daprd"):
+        try:
+            logs = smoke.command(
+                [
+                    "kubectl",
+                    "-n",
+                    namespace,
+                    "logs",
+                    "deployment/custos-workflow-service",
+                    "-c",
+                    container,
+                    "--tail=300",
+                ]
+            )
+            report["serviceLogs"][container] = failure_locations(logs)
+        except RuntimeError as exc:
+            report["collectionErrors"].append(
+                {"source": container, "errorType": type(exc).__name__}
+            )
+    for record in report["terminalRuns"]:
+        try:
+            record["runtime"] = service_probe(
+                "workflow-service", "diagnose", record["runId"], sha
+            )
+        except RuntimeError as exc:
+            report["collectionErrors"].append(
+                {"source": "runtime-state", "errorType": type(exc).__name__}
+            )
+    output.with_name("public-workflow-diagnostics.json").write_text(
+        json.dumps(report, indent=2)
+    )
+    print(json.dumps(report), flush=True)
+
+
 def run(output: Path, values: Path) -> None:
     """Require separate public completion, actual private termination and final public readback."""
     import runtime as smoke
@@ -688,7 +823,7 @@ def run(output: Path, values: Path) -> None:
     try:
         wait_job(client)
     except RuntimeError:
-        print(json.dumps({"publicStartRejections": public_start_diagnostics()}))
+        collect_failure_diagnostics(output, sha)
         raise
     logs = smoke.command(["kubectl", "-n", namespace, "logs", "job/" + RESOURCE])
     report = report_from_logs(logs, sha)
@@ -735,6 +870,7 @@ def main() -> None:
             "run",
             "cancel",
             "runtime-state",
+            "diagnose",
             "readback",
         ),
     )
@@ -747,7 +883,7 @@ def main() -> None:
         asyncio.run(seed())
     elif args.phase == "client":
         print(REPORT_PREFIX + json.dumps(exercise()), flush=True)
-    elif args.phase in {"cancel", "runtime-state", "readback"}:
+    elif args.phase in {"cancel", "runtime-state", "diagnose", "readback"}:
         if args.run_id is None or re.fullmatch(r"[\w-]+", args.run_id) is None:
             parser.error("--run-id must be an opaque root run identifier")
         if args.phase == "readback":
@@ -755,11 +891,12 @@ def main() -> None:
         else:
             if args.sha is None or re.fullmatch(r"[a-f0-9]{40}", args.sha) is None:
                 parser.error("--sha must be the exact tested commit")
-            report = asyncio.run(
-                private_cancellation(args.run_id, args.sha)
-                if args.phase == "cancel"
-                else runtime_termination(args.run_id, args.sha)
-            )
+            if args.phase == "cancel":
+                report = asyncio.run(private_cancellation(args.run_id, args.sha))
+            elif args.phase == "diagnose":
+                report = asyncio.run(runtime_diagnostics(args.run_id, args.sha))
+            else:
+                report = asyncio.run(runtime_termination(args.run_id, args.sha))
         print(REPORT_PREFIX + json.dumps(report), flush=True)
     elif args.phase == "prepare":
         if args.values is None:
