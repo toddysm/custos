@@ -36,6 +36,7 @@ from custos_workflow.clients.trigger import FakeTriggerServiceClient
 from custos_workflow.document import WorkflowDocument
 from custos_workflow.providers import RunComponents
 from custos_workflow.runs.controller import WorkflowVersion
+from custos_workflow.runs.errors import RunStateConflictError
 from custos_workflow.runs.ids import derive_run_id
 from custos_workflow.runs.model import RunStatus
 from custos_workflow.runs.public_start import PublicRunStarter
@@ -404,6 +405,30 @@ def test_public_start_keyless_requests_keep_distinct_uuid4_ids(
     assert first.json()["runId"] != second.json()["runId"]
     assert UUID(first.json()["runId"]).version == UUID(second.json()["runId"]).version == 4
     assert len(catalog.calls) == 2
+
+
+@pytest.mark.parametrize("error_type", [ValueError, RunStateConflictError])
+def test_public_start_conflict_logs_only_its_source(
+    caller_start: tuple[TestClient, Ed25519PrivateKey, RunComponents, _CallerCatalog],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    error_type: type[ValueError] | type[RunStateConflictError],
+) -> None:
+    """A rejected start keeps its HTTP semantics without logging the rejected value or message."""
+    client, key, components, _ = caller_start
+
+    async def reject(request: ScheduleWorkflowRequest) -> str:
+        """Model a domain conflict or invalid backend value containing private diagnostic data."""
+        raise error_type("private-start-value")
+
+    monkeypatch.setattr(components.workflow_client, "schedule_new_workflow", reject)
+    response = _start_public(client, key)
+    assert response.status_code == 409
+    assert (
+        f"PUBLIC_START_REJECTED run={derive_run_id('ws', 'public-key')} "
+        f"cause={error_type.__name__} origin=reject:"
+    ) in caplog.text
+    assert "private-start-value" not in caplog.text
 
 
 def test_public_start_denied_catalog_grant_never_schedules(

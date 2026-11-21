@@ -645,6 +645,29 @@ def prepare(values: Path) -> None:
     wait_job(seed_job)
 
 
+def public_start_diagnostics() -> list[str]:
+    """Collect only payload-free rejection locations, never arbitrary application log lines."""
+    import runtime as smoke
+
+    logs = smoke.command(
+        [
+            "kubectl",
+            "-n",
+            os.environ["NS"],
+            "logs",
+            "deployment/custos-workflow-service",
+            "-c",
+            "workflow-service",
+            "--tail=100",
+        ]
+    )
+    return re.findall(
+        r"\bPUBLIC_START_REJECTED run=[0-9a-f-]{36} "
+        r"cause=[A-Za-z_][A-Za-z0-9_]* origin=[A-Za-z_<>][A-Za-z0-9_<>]*:[0-9]+",
+        logs,
+    )
+
+
 def run(output: Path, values: Path) -> None:
     """Require separate public completion, actual private termination and final public readback."""
     import runtime as smoke
@@ -657,7 +680,11 @@ def run(output: Path, values: Path) -> None:
         if row["kind"] == "Pod" and row["metadata"]["name"] == "custos-smoke-test"
     )
     client = client_job(public, os.environ["IMAGE_PREFIX"] + "/api-gateway:" + sha)
-    wait_job(client)
+    try:
+        wait_job(client)
+    except RuntimeError:
+        print(json.dumps({"publicStartRejections": public_start_diagnostics()}))
+        raise
     logs = smoke.command(["kubectl", "-n", namespace, "logs", "job/" + RESOURCE])
     report = report_from_logs(logs, sha)
     run_id = report["cancellationRunId"]

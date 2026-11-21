@@ -664,6 +664,56 @@ def test_private_probe_uses_real_execution_client_and_requires_terminal_cancella
     assert len(calls) == 3
 
 
+def test_failed_public_job_reports_only_payload_free_rejection_locations(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Job failure stays fatal and produces no success artifact or arbitrary service-log output."""
+    monkeypatch.setenv("NS", "custos-system")
+    monkeypatch.setenv("GITHUB_SHA", TAG)
+    monkeypatch.setenv("IMAGE_PREFIX", "localhost:5001/custos")
+    monkeypatch.setitem(
+        public.run.__globals__,
+        "rendered",
+        lambda _: [{"kind": "Pod", "metadata": {"name": "custos-smoke-test"}}],
+    )
+    monkeypatch.setitem(public.run.__globals__, "client_job", lambda *args: {})
+
+    def wait(job: dict[str, Any]) -> None:
+        """Fail at the same orchestration boundary as an unsuccessful initial public Job."""
+        raise RuntimeError("public Job failed")
+
+    diagnostic = (
+        "PUBLIC_START_REJECTED run=00000000-0000-5000-8000-000000000000 "
+        "cause=ValueError origin=reject:123"
+    )
+
+    def command(args: list[str]) -> str:
+        """Expose mixed service output without permitting it to become evidence or diagnostics."""
+        assert args == [
+            "kubectl",
+            "-n",
+            "custos-system",
+            "logs",
+            "deployment/custos-workflow-service",
+            "-c",
+            "workflow-service",
+            "--tail=100",
+        ]
+        return "unrelated-private-value\nWARNING " + diagnostic + "\nprivate-tail"
+
+    monkeypatch.setitem(public.run.__globals__, "wait_job", wait)
+    monkeypatch.setitem(sys.modules, "runtime", SimpleNamespace(command=command))
+    output = tmp_path / "evidence.json"
+    with pytest.raises(RuntimeError, match="public Job failed"):
+        public.run(output, tmp_path / "values.yaml")
+    assert json.loads(capsys.readouterr().out) == {
+        "publicStartRejections": [diagnostic]
+    }
+    assert not output.exists()
+
+
 def test_private_proof_executes_only_in_an_actual_ready_tested_container(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

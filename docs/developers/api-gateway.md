@@ -180,6 +180,9 @@ Blank body keys fall back to the header; with neither nonempty key, Gateway
 generates no hidden key and Workflow retains UUIDv4 behavior. Identical keyed
 retries after scheduling failure or a lost response reach authoritative
 Workflow recovery (keyed UUIDv5), with a bounded70-second downstream read timeout.
+Gateway binds only the scoped route for these keys and delegates payload
+equivalence/conflicts to Workflow: equivalent JSON serialization, trimmed keys
+and moving a key between body and header cannot create a premature Gateway409.
 Configured binding-store failures remain503; without a Gateway store, Workflow
 still owns durable acceptance. Other ordinary writes retain the table above.
 

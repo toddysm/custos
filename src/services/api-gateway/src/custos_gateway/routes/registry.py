@@ -804,13 +804,17 @@ def _is_recovery_write(spec: RouteSpec) -> bool:
 
 
 def _request_hash(request: Request, spec: RouteSpec, caller: AuthorizedCaller, body: bytes) -> str:
-    """Fingerprint the request for idempotency key-reuse detection."""
+    """Bind public starts to their scoped route; Workflow owns payload equivalence.
+
+    Other writes retain raw-body and selected-header key-reuse detection.
+    """
+    workflow_start = _is_workflow_start(spec)
     return compute_request_hash(
         method=request.method,
         route=request.url.path if _is_recovery_write(spec) else spec.path,
         workspace_id=caller.workspace_id,
-        headers=request.headers,
-        body=body,
+        headers={} if workflow_start else request.headers,
+        body=b"" if workflow_start else body,
     )
 
 

@@ -95,7 +95,7 @@ async def _body_workspace_id(request: Request) -> str | None:
         return None
     try:
         payload = json.loads(body)
-    except ValueError:
+    except (ValueError, RecursionError):
         return None
     if not isinstance(payload, dict):
         return None

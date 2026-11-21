@@ -8,6 +8,8 @@ are never execution-identity selection inputs.
 from __future__ import annotations
 
 import json
+import logging
+import traceback
 from collections.abc import Mapping
 from dataclasses import replace
 from datetime import timedelta
@@ -32,6 +34,8 @@ from custos_workflow.runs.orchestrator import RunInput
 from custos_workflow.runs.trigger_delivery import TriggerDeliveryController
 from custos_workflow.validator import StartRunValidator
 from custos_workflow.validator.errors import WorkspaceUnauthorizedError
+
+logger = logging.getLogger(__name__)
 
 
 class PublicRunStarter:
@@ -96,6 +100,7 @@ class PublicRunStarter:
         Keyless calls keep a newly generated UUIDv4 per request. Keyed calls
         reuse the locked workspace/key UUIDv5 and reject divergent accepted
         identity or payload. Only non-secret references enter runtime history.
+        Conflict diagnostics contain only the run ID, exception type and source location.
         """
         if (
             context.workspace != workspace
@@ -135,7 +140,17 @@ class PublicRunStarter:
                 keyless_run_id=run_id if key is None else None,
             )
             return ref, validated.replayed
-        except (ImmutableViolation, ValueError):
+        except (ImmutableViolation, ValueError, RunStateConflictError) as exc:
+            origin = traceback.extract_tb(exc.__traceback__)[-1]
+            logger.warning(
+                "PUBLIC_START_REJECTED run=%s cause=%s origin=%s:%d",
+                run_id,
+                type(exc).__name__,
+                origin.name,
+                origin.lineno,
+            )
+            if isinstance(exc, RunStateConflictError):
+                raise
             raise RunStateConflictError("public start conflicts with accepted work") from None
         except (BackendUnavailable, LeaseBusy, LeaseExpired, MigrationRequired):
             raise WorkflowRuntimeUnavailableError(

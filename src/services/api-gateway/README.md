@@ -85,7 +85,10 @@ Public Workflow starts are a separate reconciliation path: Gateway matches
 Workflow's trimmed, nonempty body-key-over-header precedence and forwards that
 key without caching HTTP outcomes or blocking identical retries in flight.
 Retries after scheduling failure or a lost response reach durable Workflow
-acceptance. No missing key is generated: genuinely keyless requests retain
+acceptance. Gateway binds only the scoped route for these keys; Workflow owns
+payload equivalence and conflicts, so equivalent JSON, trimmed keys and moving
+a key between body and header do not block recovery. No missing key is generated:
+genuinely keyless requests retain
 UUIDv4 behavior. With no Gateway store, Workflow still owns durable keyed
 acceptance; configured store failures remain503. Starts use the same bounded
 70-second downstream read budget. Domain validation remains with Workflow.

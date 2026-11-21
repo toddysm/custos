@@ -7,6 +7,7 @@ Auth exchange, storage and Dapr evidence separately.
 """
 
 import base64
+import json
 from dataclasses import dataclass
 from typing import Any
 from unittest.mock import AsyncMock
@@ -193,8 +194,9 @@ class _SigningClient(FakeAuthServiceClient):
 async def test_real_gateway_lost_acceptance_reaches_workflow_recovery(
     services: _Services, monkeypatch: pytest.MonkeyPatch, key_source: str
 ) -> None:
-    """A lost accepted response recovers the keyed run; genuinely keyless requests stay UUIDv4."""
+    """Equivalent retries recover keyed runs; Workflow still rejects divergent accepted payloads."""
     accepted: list[dict[str, Any]] = []
+    responses: list[int] = []
     schedule = AsyncMock(
         wraps=services.components.workflow_client.schedule_new_workflow
     )
@@ -219,10 +221,12 @@ async def test_real_gateway_lost_acceptance_reaches_workflow_recovery(
                     "dapr-caller-app-id": "api-gateway",
                 },
             )
-        assert response.status_code == 202
-        accepted.append(response.json())
-        if len(accepted) == 1:
-            raise httpx.ReadError("synthetic lost acceptance", request=request)
+        responses.append(response.status_code)
+        assert response.status_code in {202, 409}
+        if response.status_code == 202:
+            accepted.append(response.json())
+            if len(accepted) == 1:
+                raise httpx.ReadError("synthetic lost acceptance", request=request)
         return httpx.Response(
             response.status_code, content=response.content, headers=response.headers
         )
@@ -261,10 +265,28 @@ async def test_real_gateway_lost_acceptance_reaches_workflow_recovery(
         ) as client,
     ):
         first = await client.post(START, json=payload, headers=headers)
-        if key_source in {"body", "trimmed-body"}:
+        if key_source == "body":
+            payload.pop("idempotencyKey")
+            headers["idempotency-key"] = "effective"
+        elif key_source == "trimmed-body":
+            payload["idempotencyKey"] = "effective"
             headers["idempotency-key"] = "ignored-second"
-        retry = await client.post(START, json=payload, headers=headers)
+        headers["content-type"] = "application/json; charset=utf-8"
+        retry = await client.post(
+            START, content=json.dumps(payload, indent=2), headers=headers
+        )
+        if key_source != "keyless":
+            conflict = await client.post(
+                START,
+                json={
+                    "workflowVersionId": WORKSPACE + "/other@1",
+                    "idempotencyKey": "effective",
+                },
+                headers=headers,
+            )
+            assert conflict.status_code == 409
     assert [first.status_code, retry.status_code] == [503, 202]
+    assert responses == ([202, 202] if key_source == "keyless" else [202, 202, 409])
     ids = [row["runId"] for row in accepted]
     assert len(set(ids)) == (2 if key_source == "keyless" else 1)
     assert all(
