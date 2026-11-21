@@ -34,7 +34,7 @@ from custos_workflow.runs.ids import derive_run_id
 from custos_workflow.runs.orchestrator import RunInput
 from custos_workflow.runs.trigger_delivery import TriggerDeliveryController
 from custos_workflow.validator import StartRunValidator
-from custos_workflow.validator.errors import WorkspaceUnauthorizedError
+from custos_workflow.validator.errors import InputsSchemaError, WorkspaceUnauthorizedError
 
 logger = logging.getLogger(__name__)
 
@@ -103,6 +103,7 @@ class PublicRunStarter:
         identity or payload. Only non-secret references enter runtime history.
         Upstream RPC faults are unavailable, not accepted-work conflicts. Diagnostics
         contain only the run ID, exception type, source location and HTTP status.
+        Fresh input-schema failures retain their original422 validation envelope.
         """
         if (
             context.workspace != workspace
@@ -142,6 +143,8 @@ class PublicRunStarter:
                 keyless_run_id=run_id if key is None else None,
             )
             return ref, validated.replayed
+        except InputsSchemaError:
+            raise
         except (ImmutableViolation, ValueError, RunStateConflictError) as exc:
             origin = traceback.extract_tb(exc.__traceback__)[-1]
             logger.warning(

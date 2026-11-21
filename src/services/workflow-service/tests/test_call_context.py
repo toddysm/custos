@@ -463,6 +463,60 @@ def test_public_start_denied_catalog_grant_never_schedules(
     )
 
 
+def test_caller_bound_invalid_input_preserves_422_without_acceptance(
+    caller_start: tuple[TestClient, Ed25519PrivateKey, RunComponents, _CallerCatalog],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Real scoped validation returns its field-level422 before durable acceptance or scheduling."""
+    client, key, components, catalog = caller_start
+
+    async def version(
+        workspace: str, version_id: str, identity: ExecutionIdentity
+    ) -> WorkflowVersion:
+        """Return a real published integer input schema through the caller-bound Catalog seam."""
+        catalog.calls.append(identity)
+        document = WorkflowDocument.model_validate(
+            {
+                "apiVersion": "custos.dev/v1",
+                "kind": "Workflow",
+                "metadata": {"name": "public", "workspace": workspace},
+                "spec": {
+                    "inputs": {"count": {"type": "integer", "required": True}},
+                    "steps": [{"id": "proof", "let": {"ok": "${{ true }}"}}],
+                },
+            }
+        )
+        return WorkflowVersion(version_id, workspace + "/public", "public", "1", document)
+
+    monkeypatch.setattr(catalog, "get_execution_workflow_version", version)
+    schedule = AsyncMock()
+    monkeypatch.setattr(components.workflow_client, "schedule_new_workflow", schedule)
+    response = _start_public(client, key, extra={"inputs": {"count": "not-an-integer"}})
+    assert response.status_code == 422, response.text
+    body = response.json()
+    assert body["code"] == "workflow.validator.inputs_schema_error"
+    assert body["workspaceId"] == "ws"
+    assert body["validation"] == [
+        {"loc": "/count", "code": "type", "message": "'not-an-integer' is not of type 'integer'"}
+    ]
+    assert catalog.calls == [ExecutionIdentity("ws", "operator", "binding-1")]
+    schedule.assert_not_awaited()
+    controller = components.trigger_delivery_controller
+    assert controller is not None and client.portal is not None
+    assert (
+        client.portal.call(
+            controller.provider.get_workflow_start,
+            WorkspaceId("ws"),
+            derive_run_id("ws", "public-key"),
+        )
+        is None
+    )
+    assert (
+        client.portal.call(components.run_store.get_run, "ws", derive_run_id("ws", "public-key"))
+        is None
+    )
+
+
 @pytest.mark.parametrize("field", ["executionIdentity", "permissions", "token"])
 def test_public_start_rejects_forged_execution_fields(
     caller_start: tuple[TestClient, Ed25519PrivateKey, RunComponents, _CallerCatalog],

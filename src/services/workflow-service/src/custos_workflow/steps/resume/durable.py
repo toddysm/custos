@@ -385,7 +385,11 @@ def drive_durable_resume(
     graph: ExecutionGraph,
     step_id: str,
 ) -> Generator[Any, Any, StepResult]:
-    """Drive every wait effect and bind only a validated, durably acknowledged step-scoped event."""
+    """Drive wait effects, logging lazy handler failures before unchanged propagation.
+
+    Replay suppresses diagnostics; activity inputs, retries and acknowledged
+    step-scoped event binding are unchanged.
+    """
     ctx = step.workflow_context
     gen = handler.iter_resume(step, graph, step_id, delivery_protocol=2)
     sent: object = None
@@ -393,6 +397,7 @@ def drive_durable_resume(
     workspace, run_id = step.workspace_id, str(step.run_id)
     registration_failures = 0
     active_mirror: ResumeSubscriptionMirror | None = None
+    operation = "unknown"
     while True:
         try:
             if pending is None:
@@ -404,6 +409,24 @@ def drive_durable_resume(
             if isinstance(stop.value, StepFailed) and active_mirror is not None:
                 yield from _cleanup_wait(ctx, active_mirror)
             return stop.value  # type: ignore[no-any-return]
+        except (
+            TaskFailedError,
+            BackendUnavailable,
+            OSError,
+            ValueError,
+            KeyError,
+            RpcError,
+            RuntimeError,
+            TypeError,
+            AttributeError,
+        ) as exc:
+            if not ctx.is_replaying:
+                _log_resume_failure(
+                    {"runId": run_id, "stepId": step_id, "operation": operation},
+                    exc,
+                    phase="generator",
+                )
+            raise
         sent = None
         operation = {
             PersistMirrorCall: "persist",

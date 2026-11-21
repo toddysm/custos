@@ -778,11 +778,204 @@ def test_terminal_candidate_logs_only_identity_and_status(
     captured = capsys.readouterr().out
     assert (
         captured
-        == public.DIAGNOSTIC_PREFIX
+        == public.CANDIDATE_PREFIX
+        + json.dumps({"sha": TAG, "runId": run_id})
+        + "\n"
+        + public.DIAGNOSTIC_PREFIX
         + json.dumps({"sha": TAG, "runId": run_id, "status": "failed"})
         + "\n"
     )
     assert "private-input" not in captured
+
+
+@pytest.mark.parametrize(
+    "phase",
+    [
+        "runtime-wait",
+        "private-cancellation",
+        "runtime-state",
+        "public-readback",
+        "snapshot-change",
+    ],
+)
+def test_later_proof_failure_retains_nonterminal_candidate(
+    phase: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Every later proof failure retains candidate metadata, never terminal or success fabrication."""
+    monkeypatch.setenv("NS", "custos-system")
+    monkeypatch.setenv("GITHUB_SHA", TAG)
+    monkeypatch.setenv("IMAGE_PREFIX", "localhost:5001/custos")
+    run_id = "00000000-0000-5000-8000-000000000000"
+    initial = {
+        "sha": TAG,
+        "runId": "completed",
+        "cancellationRunId": run_id,
+        "publicWorkflowCompleted": True,
+        "publicReadbackVerified": True,
+        "fullReceiverCertification": False,
+    }
+    error = ValueError("private-proof-detail")
+    monkeypatch.setitem(
+        public.run.__globals__,
+        "rendered",
+        lambda _: [{"kind": "Pod", "metadata": {"name": "custos-smoke-test"}}],
+    )
+    monkeypatch.setitem(
+        public.run.__globals__, "client_job", lambda *args, **kwargs: kwargs
+    )
+
+    def wait(job: dict[str, Any]) -> None:
+        """Fail only the final readback Job when that phase is under test."""
+        if phase == "public-readback" and job.get("run_id"):
+            raise error
+
+    def probe(
+        service: str, probe_phase: str, candidate: str, sha: str
+    ) -> dict[str, Any]:
+        """Separate real proof failure from the collector's metadata-only runtime observation."""
+        assert candidate == run_id
+        if probe_phase == "diagnose":
+            return {"sha": sha, "runId": candidate, "runtimeStatus": "RUNNING"}
+        if probe_phase == ("cancel" if phase == "private-cancellation" else phase):
+            raise error
+        if probe_phase == "runtime-wait":
+            return {"liveWaitVerified": True, "acceptedInputHash": "a" * 64}
+        return {
+            "privateCancellationVerified": True,
+            "runtimeTerminationVerified": True,
+            "acceptedInputHash": ("b" if phase == "snapshot-change" else "a") * 64,
+        }
+
+    monkeypatch.setitem(public.run.__globals__, "wait_job", wait)
+    monkeypatch.setitem(public.run.__globals__, "service_probe", probe)
+    monkeypatch.setitem(
+        sys.modules,
+        "runtime",
+        SimpleNamespace(
+            command=lambda args: (
+                public.REPORT_PREFIX + json.dumps(initial)
+                if "job/" + public.RESOURCE in args
+                else ""
+            )
+        ),
+    )
+    output = tmp_path / "evidence.json"
+    with pytest.raises(ValueError) as raised:
+        public.run(output, tmp_path / "values.yaml")
+    if phase == "snapshot-change":
+        assert "changed the accepted wait snapshot" in str(raised.value)
+    else:
+        assert raised.value is error
+    report = json.loads((tmp_path / "public-workflow-diagnostics.json").read_text())
+    assert report["failedPhase"] == (
+        "runtime-state" if phase == "snapshot-change" else phase
+    )
+    assert report["candidateRuns"] == [
+        {
+            "runId": run_id,
+            "status": None,
+            "runtime": {"sha": TAG, "runId": run_id, "runtimeStatus": "RUNNING"},
+        }
+    ]
+    assert report["terminalRuns"] == []
+    assert not output.exists()
+    assert "private-proof-detail" not in json.dumps(report)
+
+
+@pytest.mark.parametrize("ttl_seconds", [300, 299])
+def test_live_wait_snapshot_requires_registered_exact_ttl_and_preserves_pin(
+    ttl_seconds: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only an exact live caller-bound mirror permits proof; output is a digest, not runtime input."""
+    import hashlib
+    from datetime import UTC, datetime, timedelta
+
+    from custos_callctx.execution import ExecutionIdentity
+    from custos_spl.interfaces.delivery import DeliveryStateProvider
+    from custos_workflow.providers import MetadataStorePool
+    from custos_workflow.runs import RunInput
+    from custos_workflow.steps.resume.durable import DurableResumeMirrorRepository
+    from custos_workflow.steps.resume.mirror import ResumeSubscriptionMirror
+
+    monkeypatch.setenv("WF_METADATA_STORE", "postgresql://localhost/synthetic")
+    now = datetime(2026, 11, 21, tzinfo=UTC)
+    run_id = "00000000-0000-5000-8000-000000000000"
+    identity = ExecutionIdentity(public.WORKSPACE, public.OPERATOR, "public-context-v1")
+    accepted = RunInput(
+        workspace_id=public.WORKSPACE,
+        workflow_version_id=f"{public.WORKSPACE}/{public.WAITING_WORKFLOW}@1",
+        compiled_graph_json="{}",
+        inputs={},
+        delivery_protocol=3,
+        execution_identity=identity,
+    )
+    encoded = json.dumps(accepted.to_dict())
+    provider = Mock(spec=DeliveryStateProvider)
+    provider.get_workflow_start = AsyncMock(
+        return_value=SimpleNamespace(input_json=encoded)
+    )
+    provider.delivery_now = AsyncMock(return_value=now)
+    opened = AsyncMock(return_value=provider)
+    closed = AsyncMock()
+    monkeypatch.setattr(MetadataStorePool, "open", opened)
+    monkeypatch.setattr(MetadataStorePool, "aclose", closed)
+    mirror = ResumeSubscriptionMirror(
+        mirror_id="synthetic-mirror",
+        run_id=run_id,
+        step_id="await-cancellation",
+        event_key="never-sent",
+        ts_subscription_id="registered",
+        registered_at=now,
+        expires_at=now + timedelta(seconds=ttl_seconds),
+        workspace_id=public.WORKSPACE,
+        delivery_protocol=2,
+        execution_identity=identity,
+    )
+    monkeypatch.setattr(
+        DurableResumeMirrorRepository,
+        "list_open_for_step",
+        AsyncMock(return_value=(mirror,)),
+    )
+    if ttl_seconds == 300:
+        digest = asyncio.run(
+            public.accepted_wait_snapshot(run_id, require_live_mirror=True)
+        )
+        assert digest == hashlib.sha256(encoded.encode()).hexdigest()
+        assert identity.principal_id not in digest
+    else:
+        with pytest.raises(ValueError, match="bounded caller wait"):
+            asyncio.run(public.accepted_wait_snapshot(run_id, require_live_mirror=True))
+    opened.assert_awaited_once()
+    closed.assert_awaited_once()
+
+
+def test_collector_failure_does_not_replace_original_proof_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Explicit collector failure still propagates the original proof exception and never success."""
+    monkeypatch.setenv("NS", "custos-system")
+    monkeypatch.setenv("GITHUB_SHA", TAG)
+    monkeypatch.setitem(sys.modules, "runtime", SimpleNamespace())
+    monkeypatch.setitem(
+        public.run.__globals__,
+        "rendered",
+        Mock(side_effect=ValueError("private-proof")),
+    )
+    monkeypatch.setitem(
+        public.run.__globals__,
+        "collect_failure_diagnostics",
+        Mock(side_effect=RuntimeError("private-collector")),
+    )
+    with pytest.raises(ValueError) as raised:
+        public.run(tmp_path / "evidence.json", tmp_path / "values.yaml")
+    assert str(raised.value) == "private-proof"
+    report = json.loads(capsys.readouterr().out)
+    assert report["collectionErrors"] == [
+        {"source": "collector", "errorType": "RuntimeError"}
+    ]
+    assert report["lifecycleProofFailed"] is True
+    assert "private" not in json.dumps(report)
+    assert not (tmp_path / "evidence.json").exists()
 
 
 def test_runtime_diagnostic_excludes_payloads_and_failure_messages(

@@ -109,6 +109,57 @@ opaque `runId` and `stepId` values in JSON. Child addresses such as
 `parent/invoke/workflow` retain their identity without putting encoded
 separators into method paths rejected by secure Dapr runtimes.
 
+### Deterministic registration time and failure evidence
+
+The handler derives `registeredAt` and the persisted deadline from the existing
+[`DaprWorkflowClock`](../../src/libs/custos-cel/src/custos_cel/clock.py), not the
+SDK's raw `current_utc_datetime`. The tested SDK can decode UTC history time as
+a naive datetime. Using that value directly violates the mirror's awareness
+guard before the first persistence activity. The clock attaches UTC while
+retaining the history time; `PT5M` still expires exactly 300 seconds later.
+Do not replace it with wall-clock time, remove mirror validation or globally
+modify SDK timestamps. The
+[actual-SDK regression](../../src/services/workflow-service/tests/runs/test_orchestrator_resume.py)
+checks first persistence, history replay and the unchanged execution pin without
+opening RPC channels. This is local causal evidence, not deployed certification.
+
+For a failed deployed proof:
+
+1. Retain `runtime-smoke-evidence` before the disposable cluster is removed.
+   Inspect `public-workflow-diagnostics.json` for the tested SHA, `failedPhase`,
+   `candidateRuns`, `terminalRuns`, `causalFailures` and `collectionErrors`.
+   `candidateRuns` may have `status: null`: an accepted identity or runtime
+   metadata observation is **not** a public terminal observation.
+2. Correlate the candidate UUID and step with `WORKFLOW_RESUME_FAILURE` records.
+   `phase: generator` covers lazy handler failures before effect dispatch;
+   `operation: unknown` means no effect has yet identified an operation.
+   Activity, final retry and driver records retain their original exception,
+   timers and durable inputs. Replay suppresses duplicate source diagnostics.
+3. Use only allowlisted identity, operation/phase, exception type, closed RPC
+   taxonomy/status and bounded filename/function/line frames. Never copy raw
+   exception messages, response bodies, inputs/outputs, selectors, credentials,
+   headers or absolute paths into an issue. Ready Workflow and Dapr logs are
+   summarized too, not just logs from failed pods.
+4. Check `collectionErrors` separately. Capture covers initial public execution,
+   private cancellation, independent runtime reads and public readback. A
+   collector failure is explicit and cannot replace the original proof failure.
+   Metadata diagnostics use `fetch_payloads=False`; an unsupported history API
+   or null failure details is a limitation, not evidence of an absent error.
+5. Record source/tested merge/image/run identities and exact owned cleanup.
+   Follow the approved run cap and stop for authorization after a failed final
+   verification; do not dispatch another diagnostic run automatically.
+
+Success requires separate public completion/get/list, the real no-event wait,
+actual Trigger-signed cancellation, independent runtime `TERMINATED`, and public
+`cancelled` readback with unchanged accepted identity/input. Failure artifacts,
+local tests, or cancellation acceptance alone do not prove that sequence.
+The Workflow-container probe checks the registered, unexpired 300-second mirror
+and its caller pin before cancellation. It compares the durable accepted
+snapshot's SHA-256 before and after cancellation, retaining only the digest and
+verification flags; neither database access nor snapshot contents reach the
+public client.
+Receiver/recovery/replay/isolation certification remains a separate gate.
+
 ## The `waitFor:` schema
 
 A `waitFor:` step carries a single `waitFor:` block

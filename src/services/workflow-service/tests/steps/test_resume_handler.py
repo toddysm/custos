@@ -63,12 +63,14 @@ from custos_workflow.steps.resume.durable import (
     ResumeActivityHandler,
     _activity,
     build_resume_activity,
+    drive_durable_resume,
 )
 from custos_workflow.steps.resume.handler import (
     DEFAULT_REGISTER_SUB_MAX_RETRIES,
     DEFAULT_RESUME_SUB_TTL,
     PENDING_TS_SUBSCRIPTION_ID,
     PersistMirrorCall,
+    RegisterResumeSubscriptionCall,
     WaitForExternalEventCall,
 )
 
@@ -82,6 +84,83 @@ _STRING_KEY_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {"key": {"type": "string"}, "sel": {"type": "string"}},
 }
+
+
+@pytest.mark.parametrize("replaying", [False, True])
+def test_pre_effect_failure_preserves_exception_and_replay_privacy(
+    replaying: bool, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Correlate a lazy failure without activities, private values or replay logging."""
+    from collections.abc import Generator
+
+    error = ValueError("private-mirror-detail")
+    context = _ctx(run_id="00000000-0000-5000-8000-000000000000")
+    monkeypatch.setattr(FakeWorkflowContext, "is_replaying", property(lambda _: replaying))
+    handler = WaitForStepHandler(InMemoryResumeSubscriptionMirrorRepository())
+
+    def fail(*args: Any, **kwargs: Any) -> Generator[Any, Any, Any]:
+        """Raise while advancing the lazy handler, before any effect can be dispatched."""
+        raise error
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(WaitForStepHandler, "iter_resume", fail)
+    generator = drive_durable_resume(handler, context, _graph(_wait_for_node()), "await-event")
+    with pytest.raises(ValueError) as raised:
+        next(generator)
+    assert raised.value is error
+    records = [
+        json.loads(record.getMessage().split("WORKFLOW_RESUME_FAILURE ", 1)[1])
+        for record in caplog.records
+        if "WORKFLOW_RESUME_FAILURE " in record.getMessage()
+    ]
+    assert len(records) == (0 if replaying else 1)
+    if not replaying:
+        assert records[0]["runId"] == str(context.run_id)
+        assert records[0]["stepId"] == "await-event"
+        assert records[0]["phase"] == "generator"
+        assert records[0]["operation"] == "unknown"
+        assert records[0]["frames"][-1]["function"] == "fail"
+    assert "private" not in caplog.text
+
+
+def test_pending_activity_error_is_logged_when_handler_throw_propagates(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Generator throw preserves the registration error and its existing backoff timer."""
+    from collections.abc import Generator
+
+    context = _ctx(run_id="00000000-0000-5000-8000-000000000000")
+    handler = WaitForStepHandler(InMemoryResumeSubscriptionMirrorRepository())
+
+    def register(*args: Any, **kwargs: Any) -> Generator[Any, Any, Any]:
+        """Yield registration once and let the original activity exception escape the handler."""
+        yield RegisterResumeSubscriptionCall(
+            RegisterResumeSubscriptionRequest(
+                run_id=str(context.run_id),
+                step_id="await-event",
+                event_key="never-sent",
+                ttl="PT5M",
+            )
+        )
+
+    monkeypatch.setattr(WaitForStepHandler, "iter_resume", register)
+    generator = drive_durable_resume(handler, context, _graph(_wait_for_node()), "await-event")
+    next(generator)
+    error = BackendUnavailable("private-registration-detail")
+    timer = generator.throw(error)
+    assert timer.fire_at == _NOW + timedelta(seconds=1)
+    with pytest.raises(BackendUnavailable) as raised:
+        generator.send(None)
+    assert raised.value is error
+    records = [
+        json.loads(record.getMessage().split("WORKFLOW_RESUME_FAILURE ", 1)[1])
+        for record in caplog.records
+        if "WORKFLOW_RESUME_FAILURE " in record.getMessage()
+    ]
+    assert records[-1]["phase"] == "generator"
+    assert records[-1]["operation"] == "register"
+    assert records[-1]["runId"] == str(context.run_id)
+    assert "private" not in caplog.text
 
 
 @pytest.mark.parametrize("operation", ["register", "ack"])

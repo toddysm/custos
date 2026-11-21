@@ -141,6 +141,14 @@ key returns409, while missing original bindings fail explicitly rather than
 selecting a new default. Legacy entries are not silently migrated. Keyed UUIDv5
 and keyless UUIDv4 run IDs and body-over-header key precedence are preserved.
 
+Fresh caller-bound input validation retains the same `422
+workflow.validator.inputs_schema_error` response and `validation` extension as
+the legacy validator path, before scheduling or durable acceptance. For example,
+an integer input named `count` supplied as a string has a validation entry with
+`loc: "/count"` and `code: "type"`. This is not an accepted-work conflict (`409`)
+or an unavailable upstream dependency (`503`); denied downstream grants remain
+`403`. Matching accepted replays still recover their original immutable snapshot.
+
 The boundary with the Run Controller is sharp: the API Adapter
 **never** touches Dapr Workflow, the persistent run store, the
 metadata-store provider, or the step / activity wiring. It owns
