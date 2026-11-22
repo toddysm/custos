@@ -338,6 +338,7 @@ def _start_public(
     principal: str = "operator",
     idempotency_key: str | None = "public-key",
     extra: dict[str, Any] | None = None,
+    correlation_id: str | None = None,
 ) -> Response:
     """Issue a real signed public POST, retaining body/key validation at the HTTP boundary."""
     claims = _gateway_claims()
@@ -346,9 +347,11 @@ def _start_public(
     if idempotency_key is not None:
         body["idempotencyKey"] = idempotency_key
     body.update(extra or {})
-    response = client.post(
-        "/v1/workspaces/ws/runs", headers=_gateway_headers(key, claims), json=body
-    )
+    headers = _gateway_headers(key, claims)
+    if correlation_id is not None:
+        headers = [(name, value) for name, value in headers if name != "x-correlation-id"]
+        headers.append(("x-correlation-id", correlation_id))
+    response = client.post("/v1/workspaces/ws/runs", headers=headers, json=body)
     assert isinstance(response, Response)
     return response
 
@@ -460,6 +463,45 @@ def test_public_start_denied_catalog_grant_never_schedules(
     assert (
         client.portal.call(components.run_store.get_run, "ws", derive_run_id("ws", "public-key"))
         is None
+    )
+
+
+def test_public_start_uncertain_schedule_logs_cause_and_preserves_acceptance(
+    caller_start: tuple[TestClient, Ed25519PrivateKey, RunComponents, _CallerCatalog],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A scheduling503 retains its source/correlation while the immutable acceptance survives."""
+    client, key, components, _ = caller_start
+
+    async def fail(request: ScheduleWorkflowRequest) -> str:
+        """Fail the actual schedule seam after durable acceptance, without exposing private text."""
+        raise OSError("credential=syntheticCredentialError")
+
+    monkeypatch.setattr(components.workflow_client, "schedule_new_workflow", fail)
+    correlation = "00000000-0000-5000-8000-000000000000"
+    response = _start_public(client, key, correlation_id=correlation)
+    assert response.status_code == 503
+    records = [
+        json.loads(row.getMessage().split("WORKFLOW_PUBLIC_START_FAILURE ")[1])
+        for row in caplog.records
+        if "WORKFLOW_PUBLIC_START_FAILURE " in row.getMessage()
+    ]
+    assert len(records) == 1
+    assert records[0]["correlationId"] == correlation
+    assert records[0]["phase"] == "durable-start"
+    assert records[0]["errorType"] == "OSError"
+    assert records[0]["frames"][-1]["function"] == "fail"
+    assert "syntheticCredentialError" not in caplog.text
+    controller = components.trigger_delivery_controller
+    assert controller is not None and client.portal is not None
+    assert (
+        client.portal.call(
+            controller.provider.get_workflow_start,
+            WorkspaceId("ws"),
+            derive_run_id("ws", "public-key"),
+        )
+        is not None
     )
 
 

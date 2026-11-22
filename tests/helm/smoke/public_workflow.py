@@ -23,7 +23,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any
-from uuid import UUID
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 WORKSPACE = "workspace-default"
 WORKFLOW = "public-context-proof"
@@ -34,6 +34,32 @@ EXECUTION_RESOURCE = RESOURCE + "-execution"
 REPORT_PREFIX = "PUBLIC_WORKFLOW_EVIDENCE "
 DIAGNOSTIC_PREFIX = "PUBLIC_WORKFLOW_TERMINAL "
 CANDIDATE_PREFIX = "PUBLIC_WORKFLOW_CANDIDATE "
+REQUEST_PREFIX = "PUBLIC_WORKFLOW_REQUEST "
+DIAGNOSTIC_ERROR_TYPES = frozenset(
+    {
+        "WorkflowRuntimeUnavailableError",
+        "RunStateConflictError",
+        "ValueError",
+        "BackendUnavailable",
+        "LeaseBusy",
+        "LeaseExpired",
+        "MigrationRequired",
+        "ImmutableViolation",
+        "OutboundRpcStatusError",
+        "OutboundRpcTransportError",
+        "OutboundRpcDecodeError",
+        "OSError",
+        "TimeoutError",
+        "LifecycleEventPublishError",
+        "_InactiveRpcError",
+        "TaskFailedError",
+        "RuntimeError",
+        "TypeError",
+        "AttributeError",
+        "KeyError",
+        "unrecognized",
+    }
+)
 
 
 def workflow_document() -> dict[str, Any]:
@@ -145,9 +171,21 @@ def request(
     method: str, path: str, body: dict[str, Any] | None = None
 ) -> dict[str, Any]:
     """Require the public response contract without printing credentials or response payloads."""
+    sha = os.environ["GITHUB_SHA"]
+    correlation = str(
+        uuid5(NAMESPACE_URL, f"custos-public-proof:{sha}:{method}:{path}")
+    )
+    record = {
+        "sha": sha,
+        "correlationId": correlation,
+        "method": method,
+        "httpStatus": None,
+    }
+    print(REQUEST_PREFIX + json.dumps(record), flush=True)
     headers = {
         "authorization": "Bearer " + os.environ["CUSTOS_TEST_TOKEN"],
         "accept": "application/json",
+        "x-correlation-id": correlation,
     }
     data = None
     if body is not None:
@@ -166,6 +204,8 @@ def request(
     except urllib.error.HTTPError as error:
         with error:
             status, raw = error.code, error.read()
+    record["httpStatus"] = status
+    print(REQUEST_PREFIX + json.dumps(record), flush=True)
     if status != (202 if method == "POST" else 200):
         code = "unclassified"
         try:
@@ -474,7 +514,7 @@ async def runtime_waiting(run_id: str, sha: str) -> dict[str, Any]:
 
 
 def failure_locations(text: str) -> dict[str, Any]:
-    """Keep bounded Python source frames and exception names, never messages or payloads."""
+    """Keep bounded Python source locations only, never types inferred from arbitrary text."""
     frames = re.findall(
         r'File "[^"\n]*/([A-Za-z_][A-Za-z0-9_]*\.py)", line ([0-9]+), '
         r"in ([A-Za-z_<>][A-Za-z0-9_<>]*)",
@@ -485,9 +525,6 @@ def failure_locations(text: str) -> dict[str, Any]:
             {"file": file, "line": int(line), "function": function}
             for file, line, function in frames[-30:]
         ],
-        "exceptionTypes": sorted(
-            set(re.findall(r"\b[A-Za-z_][A-Za-z0-9_]*(?:Error|Exception)\b", text))
-        )[:30],
     }
 
 
@@ -505,10 +542,7 @@ async def runtime_diagnostics(run_id: str, sha: str) -> dict[str, Any]:
                 raise RuntimeError("diagnostic runtime instance was not found")
             details = state.failure_details
             error_type = None if details is None else details.error_type
-            if (
-                error_type is not None
-                and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.]{0,100}", error_type) is None
-            ):
+            if error_type is not None and error_type not in DIAGNOSTIC_ERROR_TYPES:
                 error_type = "unrecognized"
             return {
                 "sha": sha,
@@ -522,9 +556,7 @@ async def runtime_diagnostics(run_id: str, sha: str) -> dict[str, Any]:
                     else "unsupported-client-api"
                 ),
                 "failureLocations": failure_locations(
-                    ""
-                    if details is None
-                    else (details.stack_trace or "") + "\n" + details.message
+                    "" if details is None else (details.stack_trace or "")
                 ),
             }
     finally:
@@ -848,12 +880,13 @@ def public_start_diagnostics() -> list[str]:
             "--tail=100",
         ]
     )
-    return re.findall(
+    error_types = "|".join(re.escape(name) for name in sorted(DIAGNOSTIC_ERROR_TYPES))
+    pattern = re.compile(
         r"\bPUBLIC_START_REJECTED run=[0-9a-f-]{36} "
-        r"cause=[A-Za-z_][A-Za-z0-9_]* origin=[A-Za-z_<>][A-Za-z0-9_<>]*:[0-9]+"
+        rf"cause=(?:{error_types}) origin=[A-Za-z_<>][A-Za-z0-9_<>]*:[0-9]+"
         r"(?: status=(?:[1-5][0-9]{2}|None))?",
-        logs,
     )
+    return [match.group(0) for match in pattern.finditer(logs)]
 
 
 def collect_failure_diagnostics(
@@ -881,6 +914,8 @@ def collect_failure_diagnostics(
         "causalFailures": [],
         "terminalRuns": [],
         "candidateRuns": [],
+        "publicRequests": [],
+        "dependencyFailures": [],
         "collectionErrors": [],
     }
     candidates: dict[str, dict[str, Any]] = {}
@@ -920,7 +955,40 @@ def collect_failure_diagnostics(
         )
     try:
         logs = smoke.command(["kubectl", "-n", namespace, "logs", "job/" + RESOURCE])
+        requests: dict[str, dict[str, Any]] = {}
         for line in logs.splitlines():
+            if line.startswith(REQUEST_PREFIX):
+                record = json.loads(line.removeprefix(REQUEST_PREFIX))
+                if (
+                    not isinstance(record, dict)
+                    or record.get("sha") != sha
+                    or not isinstance(record.get("correlationId"), str)
+                    or re.fullmatch(
+                        r"[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}",
+                        record["correlationId"],
+                    )
+                    is None
+                    or record.get("method") not in {"POST", "GET"}
+                    or (
+                        record.get("httpStatus") is not None
+                        and (
+                            type(record["httpStatus"]) is not int
+                            or not 100 <= record["httpStatus"] <= 599
+                        )
+                    )
+                ):
+                    raise ValueError(
+                        "public request diagnostic identity or status is invalid"
+                    )
+                requests[record["correlationId"]] = {
+                    key: record[key]
+                    for key in ("correlationId", "method", "httpStatus")
+                }
+                if len(requests) > 30:
+                    raise ValueError(
+                        "public request diagnostic count exceeds its bound"
+                    )
+                report["publicRequests"] = list(requests.values())
             for prefix in (CANDIDATE_PREFIX, DIAGNOSTIC_PREFIX):
                 if line.startswith(prefix):
                     retain_candidate(
@@ -931,7 +999,14 @@ def collect_failure_diagnostics(
         report["collectionErrors"].append(
             {"source": "client-job", "errorType": type(exc).__name__}
         )
-    for container in ("workflow-service", "daprd"):
+    for service, container, source in (
+        ("api-gateway", "api-gateway", "api-gateway"),
+        ("api-gateway", "daprd", "api-gateway-daprd"),
+        ("auth-service", "auth-service", "auth-service"),
+        ("auth-service", "daprd", "auth-service-daprd"),
+        ("workflow-service", "workflow-service", "workflow-service"),
+        ("workflow-service", "daprd", "daprd"),
+    ):
         try:
             logs = smoke.command(
                 [
@@ -939,19 +1014,28 @@ def collect_failure_diagnostics(
                     "-n",
                     namespace,
                     "logs",
-                    "deployment/custos-workflow-service",
+                    "deployment/custos-" + service,
                     "-c",
                     container,
                     "--tail=300",
                 ]
             )
-            report["serviceLogs"][container] = failure_locations(logs)
-            report["causalFailures"].extend(
-                resume_failure_records(logs, set(candidates))
-            )
+            report["serviceLogs"][source] = failure_locations(logs)
+            if container == "workflow-service":
+                report["causalFailures"].extend(
+                    resume_failure_records(logs, set(candidates))
+                )
+            if container in {"api-gateway", "workflow-service"}:
+                report["dependencyFailures"].extend(
+                    dependency_failure_records(
+                        logs,
+                        {row["correlationId"] for row in report["publicRequests"]},
+                        source,
+                    )
+                )
         except (RuntimeError, TypeError, ValueError, KeyError, OSError) as exc:
             report["collectionErrors"].append(
-                {"source": container, "errorType": type(exc).__name__}
+                {"source": source, "errorType": type(exc).__name__}
             )
     for record in candidates.values():
         try:
@@ -970,6 +1054,137 @@ def collect_failure_diagnostics(
         json.dumps(report, indent=2)
     )
     print(json.dumps(report), flush=True)
+
+
+def diagnostic_source_frames(value: object) -> list[dict[str, Any]]:
+    """Validate at most five structured source locations, discarding all extra frame fields."""
+    if not isinstance(value, list) or len(value) > 5:
+        raise ValueError("diagnostic source frames exceed their bound")
+    frames = []
+    for frame in value:
+        if (
+            not isinstance(frame, dict)
+            or not isinstance(frame.get("file"), str)
+            or re.fullmatch(r"[A-Za-z0-9_-]{1,100}\.py", frame["file"]) is None
+            or not isinstance(frame.get("function"), str)
+            or re.fullmatch(r"[A-Za-z0-9_<>-]{1,100}", frame["function"]) is None
+            or type(frame.get("line")) is not int
+            or frame["line"] < 1
+        ):
+            raise ValueError("diagnostic source frame is invalid")
+        frames.append({key: frame[key] for key in ("file", "function", "line")})
+    return frames
+
+
+def dependency_failure_records(
+    logs: str, correlations: set[str], source: str
+) -> list[dict[str, Any]]:
+    """Keep only matched request-boundary records with fixed taxonomy and bounded source frames."""
+    prefix = (
+        "GATEWAY_DEPENDENCY_FAILURE "
+        if source == "api-gateway"
+        else "WORKFLOW_PUBLIC_START_FAILURE "
+    )
+    records = []
+    for line in logs.splitlines():
+        if prefix not in line:
+            continue
+        row, _ = json.JSONDecoder().raw_decode(line.split(prefix, 1)[1])
+        if not isinstance(row, dict):
+            raise TypeError("dependency diagnostic must be an object")
+        if row.get("correlationId") not in correlations:
+            continue
+        if (
+            row.get("phase")
+            not in {
+                "auth-client",
+                "auth-verify",
+                "callctx-sign",
+                "request-key",
+                "dapr-route",
+                "activation",
+                "lookup",
+                "identity",
+                "retention",
+                "recovery",
+                "validate",
+                "durable-start",
+            }
+            or row.get("kind")
+            not in {
+                None,
+                "transport",
+                "status",
+                "decode",
+                "unavailable",
+                "unconfigured",
+            }
+            or row.get("errorType") not in DIAGNOSTIC_ERROR_TYPES | {None}
+            or (
+                row.get("runId") is not None
+                and (
+                    not isinstance(row["runId"], str)
+                    or re.fullmatch(
+                        r"[0-9a-f]{8}-[0-9a-f]{4}-[45][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}",
+                        row["runId"],
+                    )
+                    is None
+                )
+            )
+            or (
+                row.get("httpStatus") is not None
+                and (
+                    type(row["httpStatus"]) is not int
+                    or not 100 <= row["httpStatus"] <= 599
+                )
+            )
+            or row.get("grpcStatus")
+            not in {
+                None,
+                "OK",
+                "CANCELLED",
+                "UNKNOWN",
+                "INVALID_ARGUMENT",
+                "DEADLINE_EXCEEDED",
+                "NOT_FOUND",
+                "ALREADY_EXISTS",
+                "PERMISSION_DENIED",
+                "RESOURCE_EXHAUSTED",
+                "FAILED_PRECONDITION",
+                "ABORTED",
+                "OUT_OF_RANGE",
+                "UNIMPLEMENTED",
+                "INTERNAL",
+                "UNAVAILABLE",
+                "DATA_LOSS",
+                "UNAUTHENTICATED",
+            }
+        ):
+            raise ValueError("dependency diagnostic has invalid taxonomy or status")
+        safe_frames = diagnostic_source_frames(row.get("frames", []))
+        records.append(
+            {
+                "source": source,
+                "attemptedRunId": row.get("runId")
+                if source == "workflow-service"
+                else None,
+                **{
+                    key: row.get(key)
+                    for key in (
+                        "correlationId",
+                        "phase",
+                        "kind",
+                        "errorType",
+                        "httpStatus",
+                        "grpcStatus",
+                    )
+                },
+                "frames": safe_frames,
+            }
+        )
+        if len(records) > 30:
+            raise ValueError("dependency diagnostic count exceeds its bound")
+    return records
 
 
 def resume_failure_records(logs: str, candidates: set[str]) -> list[dict[str, Any]]:
@@ -991,8 +1206,7 @@ def resume_failure_records(logs: str, candidates: set[str]) -> list[dict[str, An
             not in {"activity", "retry", "driver", "unhandled", "generator"}
             or not isinstance(record.get("stepId"), str)
             or re.fullmatch(r"[A-Za-z0-9_-]{1,100}", record["stepId"]) is None
-            or not isinstance(record.get("errorType"), str)
-            or re.fullmatch(r"[A-Za-z0-9_-]{1,100}", record["errorType"]) is None
+            or record.get("errorType") not in DIAGNOSTIC_ERROR_TYPES
             or (
                 record.get("attempt") is not None
                 and (
@@ -1043,23 +1257,9 @@ def resume_failure_records(logs: str, candidates: set[str]) -> list[dict[str, An
                 "DATA_LOSS",
                 "UNAUTHENTICATED",
             }
-            or not isinstance(record.get("frames"), list)
-            or len(record["frames"]) > 5
         ):
             raise ValueError("resume failure diagnostic has invalid fields")
-        frames = []
-        for frame in record["frames"]:
-            if (
-                not isinstance(frame, dict)
-                or not isinstance(frame.get("file"), str)
-                or re.fullmatch(r"[A-Za-z0-9_-]{1,100}\.py", frame["file"]) is None
-                or not isinstance(frame.get("function"), str)
-                or re.fullmatch(r"[A-Za-z0-9_-]{1,100}", frame["function"]) is None
-                or type(frame.get("line")) is not int
-                or frame["line"] < 1
-            ):
-                raise ValueError("resume failure source frame is invalid")
-            frames.append({key: frame[key] for key in ("file", "function", "line")})
+        frames = diagnostic_source_frames(record.get("frames"))
         records.append(
             {
                 key: record.get(key)

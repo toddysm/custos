@@ -1,10 +1,12 @@
 """Regress the smoke-only runtime activation and pre-admission identity bootstrap."""
 
 import asyncio
+import io
 import json
 import runpy
 import subprocess
 import sys
+from email.message import Message
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -743,11 +745,18 @@ def test_failed_public_job_reports_only_payload_free_rejection_locations(
     assert report["publicStartRejections"] == [diagnostic]
     assert report["terminalRuns"][0]["status"] == "failed"
     assert report["terminalRuns"][0]["runtime"]["runtimeStatus"] == "FAILED"
-    assert set(report["serviceLogs"]) == {"workflow-service", "daprd"}
+    assert set(report["serviceLogs"]) == {
+        "api-gateway",
+        "api-gateway-daprd",
+        "auth-service",
+        "auth-service-daprd",
+        "workflow-service",
+        "daprd",
+    }
     assert report["serviceLogs"]["workflow-service"]["frames"] == [
         {"file": "runner.py", "line": 42, "function": "execute"}
     ]
-    assert len(inspected) == 4
+    assert len(inspected) == 8
     assert report["causalFailures"][0]["operation"] == "register"
     assert report["causalFailures"][0]["httpStatus"] == 403
     assert "private" not in captured
@@ -978,8 +987,14 @@ def test_collector_failure_does_not_replace_original_proof_error(
     assert not (tmp_path / "evidence.json").exists()
 
 
+@pytest.mark.parametrize(
+    "error_type,expected_type",
+    [("TypeError", "TypeError"), ("syntheticStructuredError", "unrecognized")],
+)
 def test_runtime_diagnostic_excludes_payloads_and_failure_messages(
     monkeypatch: pytest.MonkeyPatch,
+    error_type: str,
+    expected_type: str,
 ) -> None:
     """Fetch only metadata and keep stack locations/type, excluding exception values and raw paths."""
     from dapr.ext import workflow
@@ -988,9 +1003,12 @@ def test_runtime_diagnostic_excludes_payloads_and_failure_messages(
     client.get_workflow_state.return_value = SimpleNamespace(
         runtime_status=SimpleNamespace(name="FAILED"),
         failure_details=SimpleNamespace(
-            error_type="TypeError",
-            message="private-error-message",
-            stack_trace='  File "/private/worker.py", line 123, in run\nTypeError: private-value',
+            error_type=error_type,
+            message="credential=syntheticCredentialError",
+            stack_trace=(
+                '  File "/private/worker.py", line 123, in run\n'
+                "TypeError: payload=syntheticPayloadException"
+            ),
         ),
         serialized_input="private-input",
         serialized_output="private-output",
@@ -1000,12 +1018,172 @@ def test_runtime_diagnostic_excludes_payloads_and_failure_messages(
     client.get_workflow_state.assert_called_once_with("root", fetch_payloads=False)
     client.close.assert_called_once_with()
     assert result["runtimeStatus"] == "FAILED"
-    assert result["failureType"] == "TypeError"
+    assert result["failureType"] == expected_type
     assert result["historyCapability"] == "unsupported-client-api"
     assert result["failureLocations"]["frames"] == [
         {"file": "worker.py", "line": 123, "function": "run"}
     ]
+    assert "exceptionTypes" not in result["failureLocations"]
+    assert "syntheticCredentialError" not in json.dumps(result)
+    assert "syntheticPayloadException" not in json.dumps(result)
+    assert "syntheticStructuredError" not in json.dumps(result)
     assert "private" not in json.dumps(result)
+
+
+def test_service_log_diagnostics_excludes_error_suffixed_private_values(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Ready-pod collection never derives exception names from credential or payload text."""
+    monkeypatch.setenv("NS", "custos-system")
+    logs = (
+        "credential=syntheticCredentialError payload=syntheticPayloadException\n"
+        '  File "/app/worker.py", line 12, in execute\n'
+        "PUBLIC_START_REJECTED run=00000000-0000-5000-8000-000000000000 "
+        "cause=syntheticCredentialError origin=execute:12 status=503\n"
+    )
+    monkeypatch.setitem(sys.modules, "runtime", SimpleNamespace(command=lambda _: logs))
+    output = tmp_path / "evidence.json"
+    public.collect_failure_diagnostics(output, TAG)
+    report = json.loads((tmp_path / "public-workflow-diagnostics.json").read_text())
+    assert report["collectionErrors"] == []
+    assert report["publicStartRejections"] == []
+    assert report["serviceLogs"]["workflow-service"]["frames"] == [
+        {"file": "worker.py", "line": 12, "function": "execute"}
+    ]
+    assert "exceptionTypes" not in json.dumps(report)
+    assert "syntheticCredentialError" not in json.dumps(report)
+    assert "syntheticPayloadException" not in json.dumps(report)
+    assert not output.exists()
+
+
+def test_first_public_503_retains_request_correlated_gateway_cause(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A503 before acceptance is correlated without a run ID and preserves the original failure."""
+    import urllib.error
+    import urllib.request
+
+    monkeypatch.setenv("NS", "custos-system")
+    monkeypatch.setenv("GITHUB_SHA", TAG)
+    monkeypatch.setenv("CUSTOS_TEST_TOKEN", "syntheticTokenError")
+    outbound: list[Any] = []
+
+    def reject(request: urllib.request.Request, *, timeout: int) -> Any:
+        """Expose a real HTTP error at the public transport seam, not a synthesized run result."""
+        outbound.append(request)
+        raise urllib.error.HTTPError(
+            request.full_url,
+            503,
+            "privateRemoteException",
+            Message(),
+            io.BytesIO(
+                b'{"code":"downstream-unavailable","detail":"syntheticPayloadException"}'
+            ),
+        )
+
+    monkeypatch.setattr(urllib.request, "urlopen", reject)
+    with pytest.raises(RuntimeError, match="public POST: HTTP 503"):
+        public.request("POST", "/v1/workspaces/workspace-default/runs", {"inputs": {}})
+    client_logs = capsys.readouterr().out
+    request_rows = [
+        json.loads(line.removeprefix(public.REQUEST_PREFIX))
+        for line in client_logs.splitlines()
+    ]
+    correlation = request_rows[0]["correlationId"]
+    assert outbound[0].get_header("X-correlation-id") == correlation
+    assert request_rows[-1]["httpStatus"] == 503
+    causal = {
+        "correlationId": correlation,
+        "phase": "dapr-route",
+        "kind": "status",
+        "httpStatus": 500,
+        "message": "syntheticCredentialError",
+    }
+    inspected = []
+
+    def command(args: list[str]) -> str:
+        """Return correlated Ready-Gateway records and unrelated ready-service errors."""
+        inspected.append(args)
+        if "job/" + public.RESOURCE in args:
+            return client_logs
+        if (
+            "deployment/custos-api-gateway" in args
+            and args[args.index("-c") + 1] == "api-gateway"
+        ):
+            return "WARNING GATEWAY_DEPENDENCY_FAILURE " + json.dumps(causal)
+        return "unrelated syntheticCredentialError"
+
+    monkeypatch.setitem(sys.modules, "runtime", SimpleNamespace(command=command))
+    output = tmp_path / "evidence.json"
+    public.collect_failure_diagnostics(output, TAG)
+    report = json.loads((tmp_path / "public-workflow-diagnostics.json").read_text())
+    assert report["collectionErrors"] == []
+    assert report["candidateRuns"] == []
+    assert report["publicRequests"] == [
+        {"correlationId": correlation, "method": "POST", "httpStatus": 503}
+    ]
+    assert len(report["dependencyFailures"]) == 1
+    assert report["dependencyFailures"][0]["source"] == "api-gateway"
+    assert report["dependencyFailures"][0]["phase"] == "dapr-route"
+    assert report["dependencyFailures"][0]["httpStatus"] == 500
+    assert any("deployment/custos-auth-service" in args for args in inspected)
+    assert "synthetic" not in json.dumps(report)
+    assert "synthetic" not in client_logs
+    assert not output.exists()
+
+
+def test_dependency_records_reject_invalid_fields_and_ignore_other_requests() -> None:
+    """Only the selected request's closed taxonomy and source fields can reach the artifact."""
+    correlation = "00000000-0000-5000-8000-000000000000"
+    valid = {
+        "correlationId": correlation,
+        "phase": "auth-verify",
+        "kind": "transport",
+        "httpStatus": None,
+        "token": "syntheticCredentialError",
+    }
+    unrelated = {**valid, "correlationId": "unrelated"}
+    prefix = "GATEWAY_DEPENDENCY_FAILURE "
+    captured = public.dependency_failure_records(
+        prefix + json.dumps(unrelated) + "\n" + prefix + json.dumps(valid),
+        {correlation},
+        "api-gateway",
+    )
+    assert len(captured) == 1
+    assert captured[0]["kind"] == "transport"
+    assert "synthetic" not in json.dumps(captured)
+    workflow = public.dependency_failure_records(
+        "WORKFLOW_PUBLIC_START_FAILURE "
+        + json.dumps(
+            {
+                "correlationId": correlation,
+                "phase": "durable-start",
+                "errorType": "OSError",
+                "runId": correlation,
+                "frames": [
+                    {
+                        "file": "runtime.py",
+                        "function": "schedule",
+                        "line": 10,
+                        "token": "private",
+                    }
+                ],
+            }
+        ),
+        {correlation},
+        "workflow-service",
+    )
+    assert workflow[0]["attemptedRunId"] == correlation
+    assert "private" not in json.dumps(workflow)
+    for field, value in (("kind", "syntheticCredentialError"), ("httpStatus", True)):
+        with pytest.raises(ValueError, match="invalid taxonomy"):
+            public.dependency_failure_records(
+                prefix + json.dumps({**valid, field: value}),
+                {correlation},
+                "api-gateway",
+            )
 
 
 def test_resume_causal_records_are_correlated_and_allowlisted() -> None:

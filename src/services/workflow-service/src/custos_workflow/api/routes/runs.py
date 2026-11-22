@@ -82,7 +82,7 @@ from custos_workflow.runs.controller import RunController, RunRef
 from custos_workflow.runs.errors import WorkflowRuntimeUnavailableError
 from custos_workflow.runs.ids import RunId
 from custos_workflow.runs.model import RunRecord, RunStatus
-from custos_workflow.runs.public_start import PublicRunStarter
+from custos_workflow.runs.public_start import PublicRunStarter, log_public_start_failure
 from custos_workflow.validator import StartRunValidator
 
 __all__ = ["ref_response_from_ref", "resolve_idempotency_key", "router"]
@@ -208,7 +208,12 @@ async def start_run(
     starter = getattr(request.app.state, "public_run_starter", None)
     if isinstance(starter, PublicRunStarter):
         ref, replayed = await starter.start(
-            ws, body.workflow_version_id, body.inputs, effective_key, ctx
+            ws,
+            body.workflow_version_id,
+            body.inputs,
+            effective_key,
+            ctx,
+            correlation_id=request.headers.get("x-correlation-id"),
         )
         request.state.wf_workflow_version_id = ref.workflow_version_id
         request.state.wf_run_id = ref.run_id
@@ -216,7 +221,9 @@ async def start_run(
             request.state.wf_idempotency_outcome = "replay" if replayed else "fresh"
         return ref_response_from_ref(ref)
     if starter is not None or getattr(request.app.state, "public_execution_required", False):
-        raise WorkflowRuntimeUnavailableError("public execution is disabled or not ready")
+        error = WorkflowRuntimeUnavailableError("public execution is disabled or not ready")
+        log_public_start_failure(None, request.headers.get("x-correlation-id"), "activation", error)
+        raise error
     validated = await validator.validate_start_run(
         workspace_id=ws,
         workflow_version_id=body.workflow_version_id,

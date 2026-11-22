@@ -22,12 +22,12 @@ headers on the forwarded call.
 
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Final
 
 import httpx
 
+from custos_gateway._telemetry import log_dependency_failure
 from custos_gateway.clients.auth import (
     DEFAULT_DAPR_HTTP_HOST,
     DEFAULT_DAPR_HTTP_PORT,
@@ -48,8 +48,6 @@ __all__ = [
     "is_transient_status",
     "shape_response_headers",
 ]
-
-logger = logging.getLogger("custos_gateway.router")
 
 #: Headers that are connection-scoped (RFC 9110 § 7.6.1, plus ``content-length``
 #: which the ASGI server recomputes from the raw body). They describe the hop to
@@ -181,7 +179,9 @@ class DownstreamRouter:
                 ),
             )
         except httpx.HTTPError as exc:
-            logger.warning("downstream %r unreachable via Dapr sidecar: %r", call.app_id, exc)
+            log_dependency_failure(
+                call.headers.get("x-correlation-id"), phase="dapr-route", kind="transport"
+            )
             raise GatewayError(
                 GatewayErrorCode.DOWNSTREAM_UNAVAILABLE,
                 detail=(
@@ -191,7 +191,12 @@ class DownstreamRouter:
             ) from exc
 
         if is_transient_status(response.status_code):
-            logger.warning("downstream %r returned HTTP %d", call.app_id, response.status_code)
+            log_dependency_failure(
+                call.headers.get("x-correlation-id"),
+                phase="dapr-route",
+                kind="status",
+                http_status=response.status_code,
+            )
             raise GatewayError(
                 GatewayErrorCode.DOWNSTREAM_UNAVAILABLE,
                 detail=(

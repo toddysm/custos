@@ -149,6 +149,16 @@ an integer input named `count` supplied as a string has a validation entry with
 or an unavailable upstream dependency (`503`); denied downstream grants remain
 `403`. Matching accepted replays still recover their original immutable snapshot.
 
+The Gateway masks downstream5xx and dependency failures as
+`503 downstream-unavailable`; that public code alone does not distinguish Auth,
+signed-context creation, request-key persistence, Dapr transport or Workflow
+execution failures. A lost/failed response also does not establish whether durable
+acceptance occurred. Keep the original key for supported recovery rather than
+inventing a new identity. Private, request-correlated diagnostic records retain
+only bounded phase/status/source fields, never bearer/context tokens, request
+bodies or raw error messages; see the
+[failure-evidence procedure](workflow-resume-subscriptions.md#deterministic-registration-time-and-failure-evidence).
+
 The boundary with the Run Controller is sharp: the API Adapter
 **never** touches Dapr Workflow, the persistent run store, the
 metadata-store provider, or the step / activity wiring. It owns

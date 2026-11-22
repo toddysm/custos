@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import httpx
 import pytest
 
@@ -169,13 +171,17 @@ async def test_invoke_forwards_get_without_body() -> None:
 
 
 @pytest.mark.parametrize("status_code", [500, 502, 503, 504])
-async def test_invoke_maps_downstream_5xx_to_503(status_code: int) -> None:
+async def test_invoke_maps_downstream_5xx_to_503(
+    status_code: int, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Mask server failures but retain the matched status without private response/body text."""
     router = _router_with(httpx.MockTransport(lambda r: httpx.Response(status_code, text="boom")))
     call = DownstreamCall(
         app_id="custos-workflow",
         http_method="POST",
         method_path="v1/workspaces/ws1/runs",
-        body=b"{}",
+        headers={"x-correlation-id": "00000000-0000-5000-8000-000000000000"},
+        body=b'{"credential":"syntheticCredentialError"}',
     )
 
     with pytest.raises(GatewayError) as excinfo:
@@ -184,17 +190,28 @@ async def test_invoke_maps_downstream_5xx_to_503(status_code: int) -> None:
     error = excinfo.value
     assert error.code is GatewayErrorCode.DOWNSTREAM_UNAVAILABLE
     assert error.status == 503
+    record = json.loads(caplog.records[-1].getMessage().split("GATEWAY_DEPENDENCY_FAILURE ")[1])
+    assert record["phase"] == "dapr-route"
+    assert record["kind"] == "status"
+    assert record["httpStatus"] == status_code
+    assert record["correlationId"] == "00000000-0000-5000-8000-000000000000"
+    assert "syntheticCredentialError" not in caplog.text
+    assert "boom" not in caplog.text
 
 
-async def test_invoke_maps_transport_error_to_503() -> None:
+async def test_invoke_maps_transport_error_to_503(caplog: pytest.LogCaptureFixture) -> None:
+    """Transport failures preserve503 while excluding raw error text and malformed correlation."""
+
     def handler(request: httpx.Request) -> httpx.Response:
-        raise httpx.ConnectError("sidecar down")
+        """Fail transport with a private marker rather than returning an HTTP response."""
+        raise httpx.ConnectError("credential=syntheticCredentialError")
 
     router = _router_with(httpx.MockTransport(handler))
     call = DownstreamCall(
         app_id="custos-trigger",
         http_method="POST",
         method_path="v1/workspaces/ws1/triggers",
+        headers={"x-correlation-id": "syntheticCorrelationError"},
         body=b"{}",
     )
 
@@ -204,6 +221,14 @@ async def test_invoke_maps_transport_error_to_503() -> None:
     error = excinfo.value
     assert error.code is GatewayErrorCode.DOWNSTREAM_UNAVAILABLE
     assert error.status == 503
+    record = json.loads(caplog.records[-1].getMessage().split("GATEWAY_DEPENDENCY_FAILURE ")[1])
+    assert record["phase"] == "dapr-route"
+    assert record["kind"] == "transport"
+    assert record["httpStatus"] is None
+    assert record["correlationId"] is None
+    assert record["correlationUnavailable"] is True
+    assert "syntheticCredentialError" not in caplog.text
+    assert "syntheticCorrelationError" not in caplog.text
 
 
 # --- router defaults ---------------------------------------------------------

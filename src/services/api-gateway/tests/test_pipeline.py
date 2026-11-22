@@ -9,6 +9,7 @@ stage is skipped when it does not apply or its backing resource is unbound.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
@@ -237,9 +238,14 @@ def test_recovery_without_key_binding_fails_before_forwarding(
     assert response.json()["code"] == "downstream-unavailable"
 
 
+@pytest.mark.parametrize(
+    "path", ["/v1/workspaces/ws-1/triggers/deadletter:replay", "/v1/workspaces/ws-1/runs"]
+)
 def test_recovery_binding_outage_fails_closed(
     settings: Settings,
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    path: str,
 ) -> None:
     """A configured but unavailable store is not permission to bypass request identity."""
     from unittest.mock import AsyncMock
@@ -250,7 +256,7 @@ def test_recovery_binding_outage_fails_closed(
     monkeypatch.setattr(
         _BindingStore,
         "reserve_idempotency_record",
-        AsyncMock(side_effect=BackendUnavailable("private database detail")),
+        AsyncMock(side_effect=BackendUnavailable("syntheticCredentialError")),
     )
     router, calls = _recording_router(status_code=200)
     app = create_app(
@@ -261,12 +267,27 @@ def test_recovery_binding_outage_fails_closed(
     )
     with TestClient(app) as client:
         response = client.post(
-            "/v1/workspaces/ws-1/triggers/deadletter:replay",
+            path,
             json={},
-            headers={**AUTH_HEADERS, "idempotency-key": "same"},
+            headers={
+                **AUTH_HEADERS,
+                "idempotency-key": "same",
+                "x-correlation-id": "00000000-0000-5000-8000-000000000000",
+            },
         )
     assert response.status_code == 503 and not calls
     assert "private" not in response.text
+    assert response.json()["code"] == "downstream-unavailable"
+    records = [
+        json.loads(row.getMessage().split("GATEWAY_DEPENDENCY_FAILURE ")[1])
+        for row in caplog.records
+        if "GATEWAY_DEPENDENCY_FAILURE " in row.getMessage()
+    ]
+    assert len(records) == 1
+    assert records[0]["phase"] == "request-key"
+    assert records[0]["kind"] == "unavailable"
+    assert records[0]["correlationId"] == "00000000-0000-5000-8000-000000000000"
+    assert "syntheticCredentialError" not in caplog.text
 
 
 @pytest.mark.parametrize(

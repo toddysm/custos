@@ -27,13 +27,16 @@ from typing import TYPE_CHECKING, Final, cast
 
 from fastapi import Request
 
+from custos_gateway._telemetry import log_dependency_failure
 from custos_gateway.clients.auth import (
     AuthServiceClient,
+    AuthServiceClientDecodeError,
     AuthServiceClientError,
     AuthServiceClientStatusError,
+    AuthServiceClientTransportError,
     VerifyAndAuthorizeRequest,
 )
-from custos_gateway.errors import GatewayError, GatewayErrorCode
+from custos_gateway.errors import GatewayError, GatewayErrorCode, correlation_id_of
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -196,9 +199,16 @@ def require_permission(permission: str) -> Callable[[Request], Awaitable[Authori
         raise ValueError("require_permission needs a non-empty permission name")
 
     async def _dependency(request: Request) -> AuthorizedCaller:
+        """Apply the enclosing permission contract with request-bound dependency failures."""
         token = _extract_bearer(request)
         workspace_id = _resolve_workspace_id(request)
-        client = get_auth_client(request)
+        try:
+            client = get_auth_client(request)
+        except GatewayError:
+            log_dependency_failure(
+                correlation_id_of(request), phase="auth-client", kind="unconfigured"
+            )
+            raise
 
         try:
             decision = await client.verify_and_authorize(
@@ -214,11 +224,28 @@ def require_permission(permission: str) -> Callable[[Request], Awaitable[Authori
                     GatewayErrorCode.INVALID_TOKEN,
                     detail="Auth Service rejected the bearer token.",
                 ) from exc
+            log_dependency_failure(
+                correlation_id_of(request),
+                phase="auth-verify",
+                kind="status",
+                http_status=exc.status_code,
+            )
             raise GatewayError(
                 GatewayErrorCode.DOWNSTREAM_UNAVAILABLE,
                 detail="Auth Service returned an unexpected status.",
             ) from exc
         except AuthServiceClientError as exc:
+            log_dependency_failure(
+                correlation_id_of(request),
+                phase="auth-verify",
+                kind=(
+                    "transport"
+                    if isinstance(exc, AuthServiceClientTransportError)
+                    else "decode"
+                    if isinstance(exc, AuthServiceClientDecodeError)
+                    else "unavailable"
+                ),
+            )
             raise GatewayError(
                 GatewayErrorCode.DOWNSTREAM_UNAVAILABLE,
                 detail="Auth Service is unavailable.",

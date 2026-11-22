@@ -54,12 +54,13 @@ from fastapi import APIRouter, Depends, Request, Response
 
 from custos_gateway._telemetry import (
     instrument_downstream,
+    log_dependency_failure,
     record_idempotency_replay,
     record_rate_limit_denial,
     request_telemetry,
 )
 from custos_gateway.clients.auth import AUTH_APP_ID
-from custos_gateway.errors import GatewayError, GatewayErrorCode
+from custos_gateway.errors import GatewayError, GatewayErrorCode, correlation_id_of
 from custos_gateway.middleware.auth import (
     AUTH_STATE_ATTR,
     AuthorizedCaller,
@@ -631,6 +632,7 @@ def _make_forwarder(spec: RouteSpec) -> Callable[[Request], Awaitable[Response]]
     """
 
     async def _forward(request: Request) -> Response:
+        """Run pre-authorized forwarding stages, retaining durable-start recovery on failure."""
         with request_telemetry(method=spec.method, route=spec.path) as telemetry:
             telemetry.set_correlation_id(getattr(request.state, "correlation_id", None))
             # The authorize dependency chain (resolve_workspace → require_permission
@@ -660,6 +662,9 @@ def _make_forwarder(spec: RouteSpec) -> Callable[[Request], Awaitable[Response]]
                 )
                 recovery = _is_recovery_write(spec)
                 if recovery and not workflow_start and (coordinator is None or key is None):
+                    log_dependency_failure(
+                        correlation_id_of(request), phase="request-key", kind="unconfigured"
+                    )
                     raise GatewayError(
                         GatewayErrorCode.DOWNSTREAM_UNAVAILABLE,
                         detail="Recovery requires configured durable request-key binding.",
@@ -672,6 +677,9 @@ def _make_forwarder(spec: RouteSpec) -> Callable[[Request], Awaitable[Response]]
                     except SPLError as exc:
                         if not recovery:
                             raise
+                        log_dependency_failure(
+                            correlation_id_of(request), phase="request-key", kind="unavailable"
+                        )
                         raise GatewayError(
                             GatewayErrorCode.DOWNSTREAM_UNAVAILABLE,
                             detail="Durable recovery request-key binding is unavailable.",

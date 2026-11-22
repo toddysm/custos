@@ -127,7 +127,8 @@ For a failed deployed proof:
 
 1. Retain `runtime-smoke-evidence` before the disposable cluster is removed.
    Inspect `public-workflow-diagnostics.json` for the tested SHA, `failedPhase`,
-   `candidateRuns`, `terminalRuns`, `causalFailures` and `collectionErrors`.
+   `publicRequests`, `dependencyFailures`, `candidateRuns`, `terminalRuns`,
+   `causalFailures` and `collectionErrors`.
    `candidateRuns` may have `status: null`: an accepted identity or runtime
    metadata observation is **not** a public terminal observation.
 2. Correlate the candidate UUID and step with `WORKFLOW_RESUME_FAILURE` records.
@@ -135,19 +136,38 @@ For a failed deployed proof:
    `operation: unknown` means no effect has yet identified an operation.
    Activity, final retry and driver records retain their original exception,
    timers and durable inputs. Replay suppresses duplicate source diagnostics.
-3. Use only allowlisted identity, operation/phase, exception type, closed RPC
-   taxonomy/status and bounded filename/function/line frames. Never copy raw
+3. If the first public POST fails before returning a run ID, match its validated
+   `PUBLIC_WORKFLOW_REQUEST` correlation ID to `GATEWAY_DEPENDENCY_FAILURE` and
+   `WORKFLOW_PUBLIC_START_FAILURE`. Gateway records distinguish Auth verification,
+   context signing, durable request-key reservation and Dapr routing failures;
+   Workflow records distinguish lookup, caller selection, validation and durable
+   start, including bounded causal source and HTTP/gRPC status when available.
+   A public `503 downstream-unavailable` alone does not identify which boundary
+   failed, and absence of a returned run ID does not prove no durable acceptance.
+   A Workflow `attemptedRunId` identifies the local start attempt, not confirmed
+   acceptance or a cancellation candidate.
+4. Use only allowlisted identity, operation/phase, **structured** exception type,
+   closed RPC taxonomy/status and bounded filename/function/line frames. Never copy raw
    exception messages, response bodies, inputs/outputs, selectors, credentials,
-   headers or absolute paths into an issue. Ready Workflow and Dapr logs are
-   summarized too, not just logs from failed pods.
-4. Check `collectionErrors` separately. Capture covers initial public execution,
+   headers or absolute paths into an issue. Types are not inferred from arbitrary
+   log text or SDK failure messages; `failureLocations` contains source frames only,
+   not `exceptionTypes`. Ready Gateway, Auth, Workflow and their Dapr logs are
+   summarized too, not just logs from failed pods. Only matching structured
+   request records count as causal evidence; generic source frames remain
+   uncorrelated. Missing or noncanonical ingress IDs are explicitly marked
+   unavailable without changing the Gateway's public correlation contract.
+5. Check `collectionErrors` separately. Capture covers initial public execution,
    private cancellation, independent runtime reads and public readback. A
    collector failure is explicit and cannot replace the original proof failure.
    Metadata diagnostics use `fetch_payloads=False`; an unsupported history API
    or null failure details is a limitation, not evidence of an absent error.
-5. Record source/tested merge/image/run identities and exact owned cleanup.
+6. Record source/tested merge/image/run identities and exact owned cleanup.
    Follow the approved run cap and stop for authorization after a failed final
    verification; do not dispatch another diagnostic run automatically.
+
+The privacy correction and early503 instrumentation require their own publication
+and deployed evidence gates. Local fault-injection tests distinguish boundaries,
+but do not establish the cause of an earlier deployed503 or prove cancellation.
 
 Success requires separate public completion/get/list, the real no-event wait,
 actual Trigger-signed cancellation, independent runtime `TERMINATED`, and public

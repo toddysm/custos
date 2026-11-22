@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 from fastapi import Depends, FastAPI, Request
 from fastapi.testclient import TestClient
 
 from custos_gateway.clients.auth import (
+    AuthServiceClientDecodeError,
     AuthServiceClientStatusError,
     AuthServiceClientTransportError,
     FakeAuthServiceClient,
@@ -25,10 +28,13 @@ from custos_gateway.middleware.auth import (
     is_auth_bypass_path,
     require_permission,
 )
+from custos_gateway.middleware.correlation import CorrelationIdMiddleware
 
 
 def _build_app(client: FakeAuthServiceClient | None) -> FastAPI:
+    """Wire correlated Auth routes, leaving the client absent when testing misconfiguration."""
     app = FastAPI()
+    app.add_middleware(CorrelationIdMiddleware)
     register_exception_handlers(app)
     if client is not None:
         setattr(app.state, AUTH_CLIENT_STATE_ATTR, client)
@@ -251,6 +257,45 @@ def test_transport_error_maps_to_downstream_unavailable() -> None:
     resp = client.get("/v1/workspaces/ws_1/things", headers={"Authorization": "Bearer tok"})
     assert resp.status_code == 503
     assert resp.json()["code"] == "downstream-unavailable"
+
+
+@pytest.mark.parametrize(
+    "error,kind,status",
+    [
+        (AuthServiceClientStatusError("syntheticCredentialError", status_code=502), "status", 502),
+        (AuthServiceClientTransportError("syntheticCredentialError"), "transport", None),
+        (AuthServiceClientDecodeError("syntheticCredentialError"), "decode", None),
+    ],
+)
+def test_verify_failure_logs_correlated_phase_not_private_values(
+    error: AuthServiceClientStatusError
+    | AuthServiceClientTransportError
+    | AuthServiceClientDecodeError,
+    kind: str,
+    status: int | None,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Auth verification failures retain their category separately from context signing."""
+    client = TestClient(_build_app(FakeAuthServiceClient(error=error)))
+    correlation = "00000000-0000-5000-8000-000000000000"
+    response = client.get(
+        "/v1/workspaces/ws_1/things",
+        headers={"authorization": "Bearer syntheticTokenError", "x-correlation-id": correlation},
+    )
+    assert response.status_code == 503
+    assert response.json()["code"] == "downstream-unavailable"
+    records = [
+        json.loads(row.getMessage().split("GATEWAY_DEPENDENCY_FAILURE ")[1])
+        for row in caplog.records
+        if "GATEWAY_DEPENDENCY_FAILURE " in row.getMessage()
+    ]
+    assert len(records) == 1
+    assert records[0]["phase"] == "auth-verify"
+    assert records[0]["kind"] == kind
+    assert records[0]["httpStatus"] == status
+    assert records[0]["correlationId"] == correlation
+    assert "syntheticCredentialError" not in caplog.text
+    assert "syntheticTokenError" not in caplog.text
 
 
 def test_bypass_route_never_calls_auth() -> None:

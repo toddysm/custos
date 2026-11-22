@@ -16,7 +16,8 @@ from typing import TYPE_CHECKING, Any, Final, cast
 
 from fastapi import Response
 
-from custos_gateway.errors import GatewayError, GatewayErrorCode
+from custos_gateway._telemetry import log_dependency_failure
+from custos_gateway.errors import GatewayError, GatewayErrorCode, correlation_id_of
 from custos_gateway.middleware.idempotency import METADATA_STORE_STATE_ATTR
 from custos_gateway.middleware.ratelimit import RATE_LIMITER_STATE_ATTR
 
@@ -53,6 +54,7 @@ def get_downstream_router(request: Request) -> DownstreamRouter:
     """
     router = getattr(request.app.state, DOWNSTREAM_ROUTER_STATE_ATTR, None)
     if router is None:
+        log_dependency_failure(correlation_id_of(request), phase="dapr-route", kind="unconfigured")
         raise GatewayError(
             GatewayErrorCode.DOWNSTREAM_UNAVAILABLE,
             detail="The gateway is not ready to forward requests.",

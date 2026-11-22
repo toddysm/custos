@@ -20,14 +20,19 @@ The module depends only on ``opentelemetry-api``. The API ships no-op tracer and
 meter providers by default, so instrumentation is inert until an SDK + exporter
 is configured at the process boundary (the Helm-managed OTel Collector in
 production; the in-memory exporters in :mod:`tests.test_telemetry`).
+Private dependency-failure records use the application logger even without an
+OTel exporter, retaining only bounded request correlation and fixed taxonomy.
 """
 
 from __future__ import annotations
 
+import json
+import logging
+import re
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
-from typing import Final
+from typing import Final, Literal
 
 from opentelemetry import metrics, trace
 from opentelemetry.metrics import Counter, Histogram
@@ -58,6 +63,45 @@ _INSTRUMENTATION_VERSION: Final = "0.1.0"
 
 _tracer = trace.get_tracer(_INSTRUMENTATION_NAME, _INSTRUMENTATION_VERSION)
 _meter = metrics.get_meter(_INSTRUMENTATION_NAME, _INSTRUMENTATION_VERSION)
+logger = logging.getLogger(__name__)
+
+
+def log_dependency_failure(
+    correlation_id: str | None,
+    *,
+    phase: Literal["auth-client", "auth-verify", "callctx-sign", "request-key", "dapr-route"],
+    kind: Literal["transport", "status", "decode", "unavailable", "unconfigured"],
+    http_status: int | None = None,
+) -> None:
+    """Log a fixed dependency boundary without request, response or exception text.
+
+    Only canonical UUID correlation IDs are retained. An absent or noncanonical
+    inbound ID is explicitly marked unavailable without changing ingress/egress
+    semantics. Status and taxonomy are bounded independently of remote messages.
+    """
+    correlation = (
+        correlation_id
+        if isinstance(correlation_id, str)
+        and re.fullmatch(
+            r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[89ab][0-9a-f]{3}-[0-9a-f]{12}",
+            correlation_id,
+        )
+        else None
+    )
+    status = http_status if type(http_status) is int and 100 <= http_status <= 599 else None
+    logger.warning(
+        "GATEWAY_DEPENDENCY_FAILURE %s",
+        json.dumps(
+            {
+                "correlationId": correlation,
+                "correlationUnavailable": correlation is None,
+                "phase": phase,
+                "kind": kind,
+                "httpStatus": status,
+            }
+        ),
+    )
+
 
 #: The span name every proxied request opens.
 SPAN_NAME: Final = "custos_gateway.request"
