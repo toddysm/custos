@@ -44,6 +44,7 @@ cannot yet express those — and are tracked for a follow-up.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import TYPE_CHECKING, Final, cast
@@ -53,12 +54,13 @@ from fastapi import APIRouter, Depends, Request, Response
 
 from custos_gateway._telemetry import (
     instrument_downstream,
+    log_dependency_failure,
     record_idempotency_replay,
     record_rate_limit_denial,
     request_telemetry,
 )
 from custos_gateway.clients.auth import AUTH_APP_ID
-from custos_gateway.errors import GatewayError, GatewayErrorCode
+from custos_gateway.errors import GatewayError, GatewayErrorCode, correlation_id_of
 from custos_gateway.middleware.auth import (
     AUTH_STATE_ATTR,
     AuthorizedCaller,
@@ -624,10 +626,13 @@ def _make_forwarder(spec: RouteSpec) -> Callable[[Request], Awaitable[Response]]
     response shaping. Each stage is skipped when it does not apply to the route
     (reads bypass rate limiting/idempotency) or when its backing resource is
     unbound (no limiter or metadata store wired), so the forwarder degrades to a
-    plain pass-through in those configurations.
+    plain pass-through in those configurations. Workflow starts reconcile with
+    durable downstream acceptance rather than caching HTTP outcomes; their
+    body-preferred supplied key is forwarded, while keyless starts stay keyless.
     """
 
     async def _forward(request: Request) -> Response:
+        """Run pre-authorized forwarding stages, retaining durable-start recovery on failure."""
         with request_telemetry(method=spec.method, route=spec.path) as telemetry:
             telemetry.set_correlation_id(getattr(request.state, "correlation_id", None))
             # The authorize dependency chain (resolve_workspace → require_permission
@@ -650,9 +655,16 @@ def _make_forwarder(spec: RouteSpec) -> Callable[[Request], Awaitable[Response]]
                 )
                 allow = _apply_rate_limit(request, caller, spec)
 
-                coordinator, key = _idempotency_context(request, spec, caller)
+                workflow_start = _is_workflow_start(spec)
+                workflow_key = _workflow_start_key(request, body) if workflow_start else None
+                coordinator, key = _idempotency_context(
+                    request, spec, caller, workflow_key=workflow_key
+                )
                 recovery = _is_recovery_write(spec)
-                if recovery and (coordinator is None or key is None):
+                if recovery and not workflow_start and (coordinator is None or key is None):
+                    log_dependency_failure(
+                        correlation_id_of(request), phase="request-key", kind="unconfigured"
+                    )
                     raise GatewayError(
                         GatewayErrorCode.DOWNSTREAM_UNAVAILABLE,
                         detail="Recovery requires configured durable request-key binding.",
@@ -665,6 +677,9 @@ def _make_forwarder(spec: RouteSpec) -> Callable[[Request], Awaitable[Response]]
                     except SPLError as exc:
                         if not recovery:
                             raise
+                        log_dependency_failure(
+                            correlation_id_of(request), phase="request-key", kind="unavailable"
+                        )
                         raise GatewayError(
                             GatewayErrorCode.DOWNSTREAM_UNAVAILABLE,
                             detail="Durable recovery request-key binding is unavailable.",
@@ -678,12 +693,10 @@ def _make_forwarder(spec: RouteSpec) -> Callable[[Request], Awaitable[Response]]
                         return response
 
                 recovery_key = (
-                    (
-                        key.idempotency_key
-                        if key is not None
-                        else resolve_idempotency_key(request.headers.get(IDEMPOTENCY_KEY_HEADER))
-                    )
-                    if recovery
+                    workflow_key
+                    if workflow_start
+                    else key.idempotency_key
+                    if recovery and key is not None
                     else None
                 )
                 reply = await _invoke_downstream(request, spec, body, recovery_key=recovery_key)
@@ -720,15 +733,22 @@ def _apply_rate_limit(request: Request, caller: AuthorizedCaller, spec: RouteSpe
 
 
 def _idempotency_context(
-    request: Request, spec: RouteSpec, caller: AuthorizedCaller
+    request: Request,
+    spec: RouteSpec,
+    caller: AuthorizedCaller,
+    *,
+    workflow_key: str | None = None,
 ) -> tuple[IdempotencyCoordinator | None, IdempotencyKey | None]:
     """Build the coordinator/key pair for a write route, or ``(None, None)``.
 
     Idempotency only engages on routes that require an idempotency key, for
     idempotent (write) methods, and when a metadata store is bound; otherwise the
-    forwarder forwards without reserving.
+    forwarder forwards without reserving. Workflow uses its body-preferred
+    supplied key and bypasses reservation entirely for a genuinely keyless start.
     """
     if not (spec.requires_idempotency_key and is_idempotent_method(request.method)):
+        return None, None
+    if _is_workflow_start(spec) and workflow_key is None:
         return None, None
     store = get_idempotency_store(request)
     if store is None:
@@ -738,15 +758,47 @@ def _idempotency_context(
         workspace_id=caller.workspace_id,
         principal_id=caller.principal_id,
         route=spec.path,
-        idempotency_key=resolve_idempotency_key(request.headers.get(IDEMPOTENCY_KEY_HEADER)),
+        idempotency_key=(
+            workflow_key
+            if workflow_key is not None
+            else resolve_idempotency_key(request.headers.get(IDEMPOTENCY_KEY_HEADER))
+        ),
     )
     coordinator = IdempotencyCoordinator(store=store, ttl_seconds=settings.idempotency_ttl_seconds)
     return coordinator, key
 
 
-def _is_recovery_write(spec: RouteSpec) -> bool:
-    """Only these commands delegate effect deduplication to durable per-entry replay claims."""
+def _is_workflow_start(spec: RouteSpec) -> bool:
+    """Identify only public starts whose durable Workflow acceptance owns effect deduplication."""
     return (
+        spec.app_id == WORKFLOW_APP_ID
+        and spec.required_permission == "workflow:execute"
+        and spec.method == "POST"
+        and spec.path == "/v1/workspaces/{workspaceId}/runs"
+    )
+
+
+def _workflow_start_key(request: Request, body: bytes) -> str | None:
+    """Match Workflow's trimmed, nonempty body-over-header key without generating a missing key.
+
+    This inspects only the transport key; malformed JSON or domain-invalid
+    fields are forwarded unchanged for Workflow's authoritative validation.
+    """
+    header = (request.headers.get(IDEMPOTENCY_KEY_HEADER) or "").strip() or None
+    try:
+        payload: object = json.loads(body)
+    except (ValueError, RecursionError):
+        return header
+    if isinstance(payload, dict):
+        body_key = payload.get("idempotencyKey")
+        if isinstance(body_key, str):
+            return body_key.strip() or header
+    return header
+
+
+def _is_recovery_write(spec: RouteSpec) -> bool:
+    """Delegate start and dead-letter effect deduplication to their durable downstream owners."""
+    return _is_workflow_start(spec) or (
         spec.app_id == TRIGGER_APP_ID
         and spec.required_permission == "trigger:admin"
         and spec.method == "POST"
@@ -760,13 +812,17 @@ def _is_recovery_write(spec: RouteSpec) -> bool:
 
 
 def _request_hash(request: Request, spec: RouteSpec, caller: AuthorizedCaller, body: bytes) -> str:
-    """Fingerprint the request for idempotency key-reuse detection."""
+    """Bind public starts to their scoped route; Workflow owns payload equivalence.
+
+    Other writes retain raw-body and selected-header key-reuse detection.
+    """
+    workflow_start = _is_workflow_start(spec)
     return compute_request_hash(
         method=request.method,
         route=request.url.path if _is_recovery_write(spec) else spec.path,
         workspace_id=caller.workspace_id,
-        headers=request.headers,
-        body=body,
+        headers={} if workflow_start else request.headers,
+        body=b"" if workflow_start else body,
     )
 
 

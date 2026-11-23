@@ -3,7 +3,9 @@
 Starts use Dapr's atomic ignore-existing policy for every runtime status.
 Resumes use a distinct channel per logical step and a consumer acknowledgement,
 so replay of an uncertain send cannot satisfy a later same-name wait.
-Legacy public runs remain on the existing controller path.
+Opted-in caller-bound public starts share this durable primitive without
+sharing private Trigger authentication. Legacy development runs retain their
+existing controller path.
 """
 
 from __future__ import annotations
@@ -109,7 +111,12 @@ class TriggerDeliveryController:
                 retain_until,
                 lease_seconds=30,
             )
-            return self._ref(claim) if claim.completed else await self._schedule(saved, claim)
+            if claim.completed:
+                return self._ref(claim)
+            current = await self.store.get_run(workspace_id, run_id)
+            if current is not None and current.status in TERMINAL_STATUSES:
+                return await self._complete_start(saved, claim)
+            return await self._schedule(saved, claim)
         if await self.store.get_run(workspace_id, run_id) is not None:
             raise RunStateConflictError(
                 "replay_unsafe: existing run has no versioned start snapshot", run_id=run_id
@@ -144,14 +151,27 @@ class TriggerDeliveryController:
         workspace_id: str,
         version: WorkflowVersion,
         inputs: Mapping[str, Any],
-        idempotency_key: str,
+        idempotency_key: str | None,
         retain_until: datetime,
         *,
         execution_identity: ExecutionIdentity | None = None,
+        keyless_run_id: RunId | None = None,
     ) -> RunRef:
-        """Recover queued/uncertain scheduling without recreating a completed runtime instance."""
+        """Persist a start atomically, retaining keyed IDs or a caller-generated keyless UUID.
+
+        Keyless public callers supply their single request-local run ID and
+        pinned identity. Private Trigger callers retain the existing keyed
+        contract. The immutable snapshot survives receipt expiry.
+        """
         await self.provider.check_delivery_ready()
-        run_id = derive_run_id(workspace_id, idempotency_key)
+        if keyless_run_id is not None:
+            if idempotency_key is not None or execution_identity is None:
+                raise ValueError("keyless start requires a pinned identity and no key")
+            run_id = keyless_run_id
+        else:
+            if not idempotency_key:
+                raise ValueError("durable start requires a key or explicit keyless run ID")
+            run_id = derive_run_id(workspace_id, idempotency_key)
         if execution_identity is not None and execution_identity.workspace_id != workspace_id:
             raise ImmutableViolation("execution identity workspace does not match the run")
         fingerprint = self._start_fingerprint(version.id, inputs, execution_identity)
@@ -182,7 +202,7 @@ class TriggerDeliveryController:
             version.id,
             to_json(graph),
             dict(inputs),
-            idempotency_key,
+            idempotency_key or "",
             delivery_protocol=3 if execution_identity is not None else 2,
             execution_identity=execution_identity,
         )
@@ -206,7 +226,7 @@ class TriggerDeliveryController:
     async def _schedule(self, saved: WorkflowStart, claim: DeliveryReceipt) -> RunRef:
         """Recover from the atomic immutable input, using runtime-side duplicate protection."""
         request = RunInput.from_dict(json.loads(saved.input_json))
-        run_id, workspace_id = RunId(saved.run_id), str(saved.workspace_id)
+        run_id = RunId(saved.run_id)
         try:
             scheduled = await self.runtime.schedule_new_workflow(
                 ScheduleWorkflowRequest(
@@ -227,6 +247,12 @@ class TriggerDeliveryController:
             raise WorkflowRuntimeUnavailableError(
                 "runtime returned a different delivery identity", run_id=str(run_id)
             )
+        return await self._complete_start(saved, claim)
+
+    async def _complete_start(self, saved: WorkflowStart, claim: DeliveryReceipt) -> RunRef:
+        """Acknowledge lifecycle publication without rescheduling an already-terminal run."""
+        request = RunInput.from_dict(json.loads(saved.input_json))
+        run_id, workspace_id = RunId(saved.run_id), str(saved.workspace_id)
         current = await self.store.get_run(workspace_id, run_id)
         if current is None:
             raise RunNotFoundError("durable run metadata is missing", run_id=str(run_id))

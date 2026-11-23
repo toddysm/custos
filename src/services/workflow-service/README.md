@@ -98,7 +98,27 @@ Process bind:
 |---|---|---|
 | `HOST` | `0.0.0.0` | Address the uvicorn process binds to. |
 | `PORT` | `8080` | Port the uvicorn process listens on. |
-| `WF_REQUIRE_CALL_CONTEXT` | `""` (dev shim) | Set to the exact literal `"1"` to enforce that every non-probe request carries `X-Custos-Workspace` and `X-Custos-Principal` headers (returns `401` `callctx_missing` otherwise). Any other value — including `"true"`, `"yes"`, `"TRUE"` — leaves the dev shim active. |
+| `WF_REQUIRE_CALL_CONTEXT` | `""` (dev shim) | Exact `"1"` requires signed public Gateway contexts. `ENVIRONMENT=production` always enforces this, regardless of the flag. Only non-production without a verifier retains the plain-header shim. |
+| `WF_AUTHZ_ENDPOINT` | Required for production | Auth base URL for shared JWKS verification; also enables signed public verification independently of background execution bindings. |
+| `APP_API_TOKEN` | Required with public verification | Local sidecar app token (Secret), never a client credential. |
+| `WF_GATEWAY_NAMESPACE` | Required with public verification | Exact authenticated namespace of Dapr app `api-gateway`. |
+| `WF_PUBLIC_EXECUTION_ENABLED` | `false` | Opt into caller-bound durable public starts. Requires one matching workspace/principal binding, a separately provisioned credential and execution-aware dependencies. Disabled enforced starts return503; reads/cancel remain independently available. |
+
+Public requests must carry a valid Auth-signed context over an authenticated
+Gateway Dapr invocation, with the exact route grant and URL workspace.
+Plain identity headers cannot substitute for or override it. Private Trigger
+execution keeps its independent caller/operation boundary. Private cancellation
+requires the Trigger-only `workflow-cancel` exchange, an explicit `run:cancel`
+workspace grant and a matching body workspace before run lookup; it may
+administrate another account's run without changing its execution pin.
+Missing production
+trust configuration fails at startup; see [Public authentication boundary](../../../docs/developers/workflow-api.md#public-authentication-boundary).
+Public starts never adopt the workspace background executor. The caller must be
+a provisioned service account in the target workspace; its actual grants govern
+each downstream operation. Public schemas stay unchanged, while protocol3
+runtime inputs retain only the original non-secret execution reference. See
+[Caller-bound public execution](../../../docs/developers/workflow-api.md#caller-bound-public-execution)
+for provisioning restrictions, rollout and replay behavior.
 
 ## Local development
 

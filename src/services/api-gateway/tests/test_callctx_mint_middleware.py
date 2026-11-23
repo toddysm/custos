@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+
+import pytest
 from custos_callctx import CALLCTX_HEADER
 from fastapi import Depends, FastAPI, Request
 from fastapi.testclient import TestClient
@@ -139,12 +142,17 @@ def test_unscoped_platform_workspace_is_signed() -> None:
     assert fake.sign_calls[0].workspace_id == "__platform__"
 
 
-def test_sign_failure_maps_to_downstream_unavailable() -> None:
+def test_sign_failure_maps_to_downstream_unavailable(caplog: pytest.LogCaptureFixture) -> None:
+    """A failed sign exchange has its own correlated record without token or exception text."""
+
     # verify_and_authorize succeeds, but callctx.sign fails — only the minter's
     # branch should map the failure onto the locked taxonomy.
     class _SignFails(FakeAuthServiceClient):
+        """Authorize normally but fail signing with a synthetic private marker."""
+
         async def callctx_sign(self, request: CallctxSignRequest) -> CallctxSignResponse:
-            raise AuthServiceClientTransportError("auth down")
+            """Raise transport failure whose message must be excluded from diagnostics."""
+            raise AuthServiceClientTransportError("credential=syntheticCredentialError")
 
     fake = _SignFails(
         decision=VerifyAndAuthorizeResponse(
@@ -152,11 +160,21 @@ def test_sign_failure_maps_to_downstream_unavailable() -> None:
         )
     )
     client = TestClient(_build_app(fake))
-    resp = client.post("/v1/workspaces/ws_42/things", json={"name": "thing"}, headers=_BEARER)
+    correlation = "00000000-0000-5000-8000-000000000000"
+    resp = client.post(
+        "/v1/workspaces/ws_42/things",
+        json={"name": "thing"},
+        headers={**_BEARER, CORRELATION_ID_HEADER: correlation},
+    )
     assert resp.status_code == 503
     assert resp.json()["code"] == "downstream-unavailable"
     # The token verified — only the minting hop failed.
     assert len(fake.verify_calls) == 1
+    record = json.loads(caplog.records[-1].getMessage().split("GATEWAY_DEPENDENCY_FAILURE ")[1])
+    assert record["phase"] == "callctx-sign"
+    assert record["kind"] == "transport"
+    assert record["correlationId"] == correlation
+    assert "syntheticCredentialError" not in caplog.text
 
 
 def test_bypass_route_mints_no_context() -> None:

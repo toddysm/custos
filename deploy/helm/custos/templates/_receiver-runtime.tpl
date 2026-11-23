@@ -69,6 +69,8 @@ env entries; unrelated operator entries survive. Secret values never enter Helm.
 {{- $_ := set $config "OTEL_EXPORTER_OTLP_PROTOCOL" "http/protobuf" -}}
 {{- else if eq $service "workflow-service" -}}
 {{- $config = dict "WF_AUTHZ_ENDPOINT" $auth "WF_REQUIRE_CALL_CONTEXT" "1"
+  "WF_GATEWAY_NAMESPACE" .Release.Namespace
+  "WF_PUBLIC_EXECUTION_ENABLED" (toString $r.publicExecutionEnabled)
   "WF_DAPR_WORKFLOW_COMPONENT" "dapr"
   "WF_DAPR_HTTP_ENDPOINT" "http://127.0.0.1:3500"
   "WF_PUBLISH_PUBSUB" "custos-pubsub" "WF_PUBLISH_TOPIC" "custos.workflow.events"

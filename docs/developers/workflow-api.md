@@ -60,11 +60,13 @@ inputs schema match, `(workspaceId, idempotencyKey)` dedup), and
 the RFC 7807 `application/problem+json` envelope every error
 travels in.
 
-The Validator is the gatekeeper. Every `StartRun` walks four
-gates before the Run Controller mints a run id:
+The Validator gates fresh `StartRun` requests before durable acceptance.
+The caller-bound starter can derive an opaque run ID earlier for replay lookup;
+matching accepted requests recover their original immutable inputs without
+repeating mutable Catalog validation. Fresh work passes four gates:
 
-1. **Workspace authorization** — the call-context workspace (set
-   by `CallContextMiddleware` from the `X-Custos-Workspace` header)
+1. **Workspace authorization** — the verified call-context workspace (set
+   by `CallContextMiddleware` from Auth-signed Gateway claims in production)
    must match the path / body workspace; mismatch → 403
    `workflow.validator.workspace_unauthorized`.
 2. **Catalog lookup** — the `workflowVersionId` must resolve via
@@ -82,11 +84,80 @@ gates before the Run Controller mints a run id:
    request fingerprint (a replay); a divergent fingerprint → 409
    `workflow.validator.idempotency_conflict`.
 
-Only after all four gates pass does the validator return a
-`ValidatedStartRun` to the route, which then forwards into
-`RunController.start_run`. The controller's own dedup gate is the
-second line of defence — every public REST `StartRun` walks both
-ledgers.
+After all four gates pass, the validator returns a `ValidatedStartRun` to the
+selected orchestration path. The caller-bound durable starter consumes
+the validated version without a second unscoped Catalog lookup. Matching accepted
+replays recover the original immutable snapshot before consulting Catalog.
+The legacy development path still uses `RunController.start_run`.
+
+### Public authentication boundary
+
+External clients send their bearer credential to the API Gateway, not identity
+headers to Workflow. Gateway authorizes the route and forwards a signed
+`x-custos-callctx` JWT over Dapr. Workflow authenticates its local sidecar token
+before trusting the exact `api-gateway` caller and configured namespace, then
+uses the shared JWKS verifier (Ed25519, issuer `custos-auth`, audience
+`custos.internal`). It checks the signed caller, URL workspace and exact grant:
+`workflow:execute` for start, `run:read` for reads, `run:cancel` for cancellation.
+Plain workspace/principal headers cannot override verified identity or act as a
+production fallback. Duplicate authentication headers are rejected.
+
+Public verification does not require background execution bindings. Trigger's
+private start/resume paths keep their separate caller and signed-operation checks;
+a public JWT is not private execution authority. Missing trust configuration fails
+at construction. Invalid credentials return 401, wrong caller/scope/grant returns
+403, and unavailable JWKS returns 503; errors never echo tokens. Exact GET health
+probes remain unauthenticated. No blanket internal or Dapr-prefix bypass is added.
+
+### Caller-bound public execution
+
+Set `WF_PUBLIC_EXECUTION_ENABLED=true` to activate durable public starts. This is
+separate from inbound verification and requires the existing execution registry,
+durable provider and scoped Catalog/runtime wiring. Invalid enabled configuration
+fails activation. Managed deployments expose the opt-in as
+`global.receiverRuntime.publicExecutionEnabled` (default `false`).
+With enforced authentication and the gate disabled, new public starts return503;
+reads and cancellation do not require execution bindings. There is no production
+fallback to the unscoped development controller.
+
+Provision exactly one binding for the verified caller's principal **and target
+workspace**, plus a separate server-side credential for that same service account
+through the existing execution secret boundary. Workspace defaults are not public
+selection policy. Missing or ambiguous bindings return503. Auth checks each
+downstream operation against that account's actual grants: `workflow:execute`
+alone does not imply Catalog read or Connector bind authority. No roles are added
+automatically, and incoming bearer tokens are never retained for execution.
+
+The public request schema is unchanged; clients cannot supply an execution
+identity, credential or permission list. Current support is same-account,
+workspace-scoped service-account execution, not human/OIDC delegation or
+execution as a different account. Cross-workspace administrators must use a
+provisioned caller account in the target workspace.
+
+New runs atomically persist their non-secret binding reference with protocol3
+runtime input. Retries, children and waits retain that pin; credential rotation
+cannot retarget accepted work. A conflicting caller or payload under an accepted
+key returns409, while missing original bindings fail explicitly rather than
+selecting a new default. Legacy entries are not silently migrated. Keyed UUIDv5
+and keyless UUIDv4 run IDs and body-over-header key precedence are preserved.
+
+Fresh caller-bound input validation retains the same `422
+workflow.validator.inputs_schema_error` response and `validation` extension as
+the legacy validator path, before scheduling or durable acceptance. For example,
+an integer input named `count` supplied as a string has a validation entry with
+`loc: "/count"` and `code: "type"`. This is not an accepted-work conflict (`409`)
+or an unavailable upstream dependency (`503`); denied downstream grants remain
+`403`. Matching accepted replays still recover their original immutable snapshot.
+
+The Gateway masks downstream5xx and dependency failures as
+`503 downstream-unavailable`; that public code alone does not distinguish Auth,
+signed-context creation, request-key persistence, Dapr transport or Workflow
+execution failures. A lost/failed response also does not establish whether durable
+acceptance occurred. Keep the original key for supported recovery rather than
+inventing a new identity. Private, request-correlated diagnostic records retain
+only bounded phase/status/source fields, never bearer/context tokens, request
+bodies or raw error messages; see the
+[failure-evidence procedure](workflow-resume-subscriptions.md#deterministic-registration-time-and-failure-evidence).
 
 The boundary with the Run Controller is sharp: the API Adapter
 **never** touches Dapr Workflow, the persistent run store, the
@@ -303,10 +374,12 @@ locked so SDK clients can branch deterministically on `code`:
 
 ## Internal RPC API
 
-In-cluster siblings reach the workflow service through a flat
+The configured Trigger service reaches the workflow service through a flat
 `/internal/...` prefix rather than the public
-`/v1/workspaces/{ws}/...` shape. The prefix is the seam the Helm
-chart / mesh uses to pin mTLS-only access. Because the workspace
+`/v1/workspaces/{ws}/...` shape. The prefix is not an authentication
+exemption: enforced deployments require the local sidecar app token,
+the exact Trigger app/namespace and an Auth-signed operation context.
+Because the workspace
 is no longer carried in the URL, every Internal RPC body promotes
 `workspaceId` to a top-level field.
 
@@ -344,12 +417,33 @@ responses remain 202.
 
 ### `InternalCancelRunRequest`
 
+Cancellation requires `executionOperation=workflow-cancel` with the existing
+`run:cancel` permission, obtained through the credential-backed
+`rpc/callctx.exchangeExecution` operation from the actual Trigger sidecar.
+The operator must provision an account and binding with that workspace grant;
+the default workspace-executor role does not acquire it. Ordinary Gateway
+contexts, legacy grants and start/resume contexts cannot authorize this RPC,
+and a cancellation context cannot authorize start or resume.
+
+The body workspace must equal the signed workspace **before any run lookup or
+runtime call**. This is workspace administration: an authorized account may
+cancel another account's run in the same workspace without replacing its
+accepted execution pin or immutable input. Public-start activation controls
+starts only; cancellation uses the independently configured private boundary.
+Mixed/incomplete production configurations fail closed.
+
 ```json
 {
   "workspaceId": "ws-prod",
   "reason": "trigger condition retracted"
 }
 ```
+
+The existing controller returns202 with a RunRef,404 for a missing run,409 for
+an invalid terminal transition and503 for dependency/runtime failure.
+`cancelling` is in progress, not terminal evidence; only `cancelled` confirms
+the terminal controller state. This does not introduce an autonomous Trigger
+cancellation policy or a new cancellation state machine.
 
 ### `RaiseExternalEventRequest`
 
@@ -454,10 +548,12 @@ The wire surface accepts the idempotency key in two places:
 - The `idempotencyKey` body field on
   `StartRunRequest` / `InternalStartRunRequest`.
 
-When both are present, **the body field wins**. The empty string
-in either field is normalised to "no key supplied". This means
-callers can opt out of the header per-request without removing
-the header entirely:
+When both contain a nonempty key, **the body field wins**. The empty string
+and whitespace-only values are normalised to "no key in that field":
+a blank body falls back to a nonempty header. Genuinely keyless execution
+requires both fields to be absent or blank. Gateway applies the same
+normalization and forwards keyed retries to durable Workflow acceptance
+rather than caching a transient HTTP response:
 
 ```bash
 # Header alone — falls through to the validator.
@@ -472,9 +568,9 @@ curl -X POST https://wf.custos.example/v1/workspaces/ws-prod/runs \
   -H 'Content-Type: application/json' \
   -d '{"workflowVersionId": "wfv-1", "idempotencyKey": "body-key-wins"}'
 
-# Body field set to empty string — opts out, header ignored too.
+# Empty body field falls back to the supplied header.
 curl -X POST https://wf.custos.example/v1/workspaces/ws-prod/runs \
-  -H 'Idempotency-Key: also-ignored' \
+  -H 'Idempotency-Key: header-fallback' \
   -H 'Content-Type: application/json' \
   -d '{"workflowVersionId": "wfv-1", "idempotencyKey": ""}'
 ```
@@ -501,8 +597,7 @@ the caller opted out).
 
 ## Configuration
 
-The API Adapter sub-module reads six environment variables
-directly; the rest of the workflow-service host's config
+The API Adapter and authentication configuration are listed below; the rest of the host's config
 ([`README.md` § Configuration](../../src/services/workflow-service/README.md#configuration))
 remains the source of truth for the variables the validator
 collaborators (Catalog client, Dapr Workflow component, etc.)
@@ -510,7 +605,11 @@ bind against.
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
-| `WF_REQUIRE_CALL_CONTEXT` | No | unset (dev mode) | When set to `"1"`, `CallContextMiddleware` rejects requests lacking either the `X-Custos-Workspace` or `X-Custos-Principal` header with a 401. Dev mode (any other value) injects placeholder values so test fixtures and local-dev runs do not need to mint real auth headers. |
+| `WF_REQUIRE_CALL_CONTEXT` | No | unset (dev mode) | Exact `"1"` requires signed verification. `ENVIRONMENT=production` also requires it, regardless of this flag. Only non-production without a verifier retains the legacy plain-header shim (absent identity yields `None`, not fabricated values). |
+| `WF_AUTHZ_ENDPOINT` | Production | — | Auth base URL supplying `/.well-known/jwks.json`; configuring it enables public signed verification even without execution bindings or the legacy flag. |
+| `APP_API_TOKEN` | With signed verification | — | Secret shared with the local Dapr sidecar, never the public client. |
+| `WF_GATEWAY_NAMESPACE` | With signed verification | — | Exact authenticated Dapr namespace of `api-gateway`. The managed receiver overlay projects the release namespace. |
+| `WF_PUBLIC_EXECUTION_ENABLED` | No | `false` | Strict boolean opt-in for caller-bound durable public starts. Requires matching caller bindings and execution-aware dependencies; disabled enforced starts return503, not legacy fallback. |
 | `WF_IDEMPOTENCY_KEY_TTL` | No | `PT24H` | ISO-8601 duration window for `(workspaceId, idempotencyKey)` dedup. Months/years are rejected (the resulting calendar-dependent window is incompatible with the ledger contract). |
 | `WF_CATALOG_ENDPOINT` | Yes (production) | — | Catalog Service endpoint the validator's `CatalogClient` resolves `workflowVersionId` against. |
 | `WF_ARM_ENDPOINT` | Yes (production) | — | Activity Runtime Manager Dapr app-id the outbound ARM adapter resolves `schedule_activity` / `cancel_activity` calls against. When unset, the workflow-service falls back to the in-process `NoopActivityRuntimeClient` so the dev / test path stays sidecar-free. |

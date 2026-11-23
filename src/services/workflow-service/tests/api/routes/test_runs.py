@@ -219,6 +219,25 @@ async def client(harness: _Harness) -> AsyncIterator[httpx.AsyncClient]:
 # ---------------------------------------------------------------------------
 
 
+async def test_enforced_public_start_never_uses_disabled_legacy_path(
+    harness: _Harness,
+) -> None:
+    """Disabling public execution must not schedule an unscoped production run."""
+    app = _build_app(harness)
+    app.state.public_execution_required = True
+    harness.controller.start_run.return_value = _make_ref()
+    async with httpx.AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        response = await client.post(
+            f"/v1/workspaces/{WORKSPACE}/runs",
+            json={"workflowVersionId": WORKFLOW_VERSION_ID},
+        )
+    assert response.status_code == 503
+    assert harness.catalog.calls == []
+    harness.controller.start_run.assert_not_awaited()
+
+
 class TestStartRun:
     async def test_happy_path_returns_202_with_ref_body(
         self, client: httpx.AsyncClient, harness: _Harness

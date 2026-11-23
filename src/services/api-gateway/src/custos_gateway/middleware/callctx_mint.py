@@ -27,11 +27,20 @@ from typing import TYPE_CHECKING, Final
 from custos_callctx import CALLCTX_HEADER
 from fastapi import Request
 
+from custos_gateway._telemetry import log_dependency_failure
 from custos_gateway.clients.auth import (
+    AuthServiceClientDecodeError,
     AuthServiceClientError,
+    AuthServiceClientStatusError,
+    AuthServiceClientTransportError,
     CallctxSignRequest,
 )
-from custos_gateway.errors import CORRELATION_ID_HEADER, GatewayError, GatewayErrorCode
+from custos_gateway.errors import (
+    CORRELATION_ID_HEADER,
+    GatewayError,
+    GatewayErrorCode,
+    correlation_id_of,
+)
 from custos_gateway.middleware.auth import AUTH_STATE_ATTR, AuthorizedCaller, get_auth_client
 
 if TYPE_CHECKING:
@@ -88,6 +97,9 @@ async def mint_call_context(request: Request) -> MintedCallContext:
     """
     caller = getattr(request.state, AUTH_STATE_ATTR, None)
     if not isinstance(caller, AuthorizedCaller):
+        log_dependency_failure(
+            correlation_id_of(request), phase="callctx-sign", kind="unconfigured"
+        )
         raise GatewayError(
             GatewayErrorCode.DOWNSTREAM_UNAVAILABLE,
             detail="Cannot mint a call-context before the request is authorized.",
@@ -106,6 +118,20 @@ async def mint_call_context(request: Request) -> MintedCallContext:
             )
         )
     except AuthServiceClientError as exc:
+        log_dependency_failure(
+            correlation_id,
+            phase="callctx-sign",
+            kind=(
+                "status"
+                if isinstance(exc, AuthServiceClientStatusError)
+                else "transport"
+                if isinstance(exc, AuthServiceClientTransportError)
+                else "decode"
+                if isinstance(exc, AuthServiceClientDecodeError)
+                else "unavailable"
+            ),
+            http_status=exc.status_code if isinstance(exc, AuthServiceClientStatusError) else None,
+        )
         raise GatewayError(
             GatewayErrorCode.DOWNSTREAM_UNAVAILABLE,
             detail="Auth Service could not mint a call-context.",

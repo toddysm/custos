@@ -323,6 +323,8 @@ class WaitForStepHandler:
 
         ``delivery_protocol=2`` scopes internal as well as external waits to the
         run's workspace; the durable driver owns all I/O and channel selection.
+        Registration and deadlines use the deterministic, timezone-aware
+        ``ctx.clock`` rather than the SDK's raw history timestamp.
 
         Sequence (each ``yield`` is resolved by the driver):
 
@@ -415,7 +417,7 @@ class WaitForStepHandler:
                 str(exc), run_id=run_id_str, step_id=step_id, binding_name="source"
             )
             return StepFailed(envelope=MappingProxyType(source_failure.to_dict()))
-        registered_at = ctx.workflow_context.current_utc_datetime
+        registered_at = ctx.clock.now()
         try:
             expires_at = registered_at + parse_wait_duration(step_id, ttl)
         except (WaitDurationError, OverflowError) as exc:

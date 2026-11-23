@@ -59,6 +59,12 @@ marker. Execution receivers check that marker rather than trusting a matching
 permission from legacy assertion-based signing. `activity-execute` uses the
 workspace `workflow:execute` grant; it does not add a platform-wide service role.
 
+`workflow-cancel` issues only the existing `run:cancel` grant and accepts only
+the configured Trigger app in the exact execution namespace. Its service
+account must explicitly hold that workspace permission; start/resume authority
+and the workspace-executor role are not cancellation authority. The receiver
+also checks the signed operation and body workspace before accessing a run.
+
 The explicit `role:workspace.executor` role grants `workflow:execute`,
 `catalog:workflows:read`, `catalog:activity-types:read` and `connector:bind` only
 at workspace scope. Activity metadata uses the separate `catalog-activity-read`

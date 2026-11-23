@@ -18,13 +18,18 @@ dispatch guards.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
-from types import MappingProxyType
+import asyncio
+import json
+from datetime import UTC, datetime, timedelta
+from types import MappingProxyType, SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from custos_cel import FixedClock, SchemaBindings, parse, type_check
+from custos_spl.errors import BackendUnavailable
 
+from custos_workflow.clients._errors import OutboundRpcStatusError
 from custos_workflow.clients.trigger import (
     CancelResumeSubscriptionRequest,
     FakeTriggerServiceClient,
@@ -54,11 +59,18 @@ from custos_workflow.steps.resume import (
     drive_resume_generator,
     drive_resume_registration_to_wait,
 )
+from custos_workflow.steps.resume.durable import (
+    ResumeActivityHandler,
+    _activity,
+    build_resume_activity,
+    drive_durable_resume,
+)
 from custos_workflow.steps.resume.handler import (
     DEFAULT_REGISTER_SUB_MAX_RETRIES,
     DEFAULT_RESUME_SUB_TTL,
     PENDING_TS_SUBSCRIPTION_ID,
     PersistMirrorCall,
+    RegisterResumeSubscriptionCall,
     WaitForExternalEventCall,
 )
 
@@ -72,6 +84,189 @@ _STRING_KEY_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {"key": {"type": "string"}, "sel": {"type": "string"}},
 }
+
+
+@pytest.mark.parametrize("replaying", [False, True])
+def test_pre_effect_failure_preserves_exception_and_replay_privacy(
+    replaying: bool, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Correlate a lazy failure without activities, private values or replay logging."""
+    from collections.abc import Generator
+
+    error = ValueError("private-mirror-detail")
+    context = _ctx(run_id="00000000-0000-5000-8000-000000000000")
+    monkeypatch.setattr(FakeWorkflowContext, "is_replaying", property(lambda _: replaying))
+    handler = WaitForStepHandler(InMemoryResumeSubscriptionMirrorRepository())
+
+    def fail(*args: Any, **kwargs: Any) -> Generator[Any, Any, Any]:
+        """Raise while advancing the lazy handler, before any effect can be dispatched."""
+        raise error
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(WaitForStepHandler, "iter_resume", fail)
+    generator = drive_durable_resume(handler, context, _graph(_wait_for_node()), "await-event")
+    with pytest.raises(ValueError) as raised:
+        next(generator)
+    assert raised.value is error
+    records = [
+        json.loads(record.getMessage().split("WORKFLOW_RESUME_FAILURE ", 1)[1])
+        for record in caplog.records
+        if "WORKFLOW_RESUME_FAILURE " in record.getMessage()
+    ]
+    assert len(records) == (0 if replaying else 1)
+    if not replaying:
+        assert records[0]["runId"] == str(context.run_id)
+        assert records[0]["stepId"] == "await-event"
+        assert records[0]["phase"] == "generator"
+        assert records[0]["operation"] == "unknown"
+        assert records[0]["frames"][-1]["function"] == "fail"
+    assert "private" not in caplog.text
+
+
+def test_pending_activity_error_is_logged_when_handler_throw_propagates(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Generator throw preserves the registration error and its existing backoff timer."""
+    from collections.abc import Generator
+
+    context = _ctx(run_id="00000000-0000-5000-8000-000000000000")
+    handler = WaitForStepHandler(InMemoryResumeSubscriptionMirrorRepository())
+
+    def register(*args: Any, **kwargs: Any) -> Generator[Any, Any, Any]:
+        """Yield registration once and let the original activity exception escape the handler."""
+        yield RegisterResumeSubscriptionCall(
+            RegisterResumeSubscriptionRequest(
+                run_id=str(context.run_id),
+                step_id="await-event",
+                event_key="never-sent",
+                ttl="PT5M",
+            )
+        )
+
+    monkeypatch.setattr(WaitForStepHandler, "iter_resume", register)
+    generator = drive_durable_resume(handler, context, _graph(_wait_for_node()), "await-event")
+    next(generator)
+    error = BackendUnavailable("private-registration-detail")
+    timer = generator.throw(error)
+    assert timer.fire_at == _NOW + timedelta(seconds=1)
+    with pytest.raises(BackendUnavailable) as raised:
+        generator.send(None)
+    assert raised.value is error
+    records = [
+        json.loads(record.getMessage().split("WORKFLOW_RESUME_FAILURE ", 1)[1])
+        for record in caplog.records
+        if "WORKFLOW_RESUME_FAILURE " in record.getMessage()
+    ]
+    assert records[-1]["phase"] == "generator"
+    assert records[-1]["operation"] == "register"
+    assert records[-1]["runId"] == str(context.run_id)
+    assert "private" not in caplog.text
+
+
+@pytest.mark.parametrize("operation", ["register", "ack"])
+async def test_activity_bridge_logs_correlated_cause_without_private_values(
+    operation: str, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The real loop bridge records the original status/source and propagates the same exception."""
+    error = OutboundRpcStatusError("private-value", status_code=403, code="private-code")
+    handler = ResumeActivityHandler(Mock(), Mock())
+    monkeypatch.setattr(handler, "execute", AsyncMock(side_effect=error))
+    bridge = build_resume_activity(handler, asyncio.get_running_loop())
+    run_id = "00000000-0000-5000-8000-000000000000"
+    body = {
+        "workspaceId": "ws",
+        "operation": operation,
+        **(
+            {"request": {"runId": run_id, "stepId": "await-cancellation", "token": "private-token"}}
+            if operation == "register"
+            else {"deliveryKey": "private-key"}
+        ),
+    }
+    with pytest.raises(OutboundRpcStatusError) as raised:
+        await asyncio.to_thread(bridge, SimpleNamespace(workflow_id=run_id, task_id=4), body)
+    assert raised.value is error
+    records = [
+        json.loads(record.getMessage().split("WORKFLOW_RESUME_FAILURE ", 1)[1])
+        for record in caplog.records
+        if "WORKFLOW_RESUME_FAILURE " in record.getMessage()
+    ]
+    assert len(records) == 1
+    assert records[0]["runId"] == run_id
+    assert records[0]["stepId"] == (
+        "await-cancellation" if operation == "register" else "unavailable"
+    )
+    assert records[0]["taskId"] == 4
+    assert records[0]["operation"] == operation
+    assert records[0]["phase"] == "activity"
+    assert records[0]["httpStatus"] == 403
+    assert records[0]["kind"] == "workflow.client.status"
+    assert records[0]["frames"]
+    assert "private" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    "operation,attempts,error_type",
+    [
+        ("persist", 5, BackendUnavailable),
+        ("register", 1, BackendUnavailable),
+        ("persist", 1, TypeError),
+    ],
+)
+def test_durable_activity_logs_final_attempt_without_changing_retries(
+    operation: str, attempts: int, error_type: type[Exception], caplog: pytest.LogCaptureFixture
+) -> None:
+    """Expose exhaustion before unchanged failure propagation, retaining the existing timers."""
+    run_id = "00000000-0000-5000-8000-000000000000"
+    context = FakeWorkflowContext(instance_id=run_id, now=_NOW)
+    body = {"operation": operation, "runId": run_id, "stepId": "await-cancellation"}
+    generator = _activity(context, body)
+    next(generator)
+    error = error_type("private-backend-detail")
+    for index in range(attempts - 1):
+        timer = generator.throw(error)
+        assert timer.fire_at == _NOW + timedelta(seconds=2**index)
+        generator.send(None)
+    with pytest.raises(error_type) as raised:
+        generator.throw(error)
+    assert raised.value is error
+    records = [
+        json.loads(record.getMessage().split("WORKFLOW_RESUME_FAILURE ", 1)[1])
+        for record in caplog.records
+        if "WORKFLOW_RESUME_FAILURE " in record.getMessage()
+    ]
+    assert [record["attempt"] for record in records] == list(range(1, attempts + 1))
+    assert records[-1]["runId"] == run_id
+    assert records[-1]["operation"] == operation
+    assert "private-backend-detail" not in caplog.text
+
+
+def test_cleanup_failure_retains_correlation_without_changing_wire_or_retry(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Cleanup retry diagnostics use driver identity, never new fields in durable activity input."""
+    run_id = "00000000-0000-5000-8000-000000000000"
+    context = FakeWorkflowContext(instance_id=run_id, now=_NOW)
+    body = {"operation": "delete", "mirrorId": "private-mirror"}
+    generator = _activity(context, body, step_id="await-cancellation")
+    first = next(generator)
+    assert first.input == body
+    timer = generator.throw(BackendUnavailable("private-detail"))
+    assert timer.fire_at == _NOW + timedelta(seconds=1)
+    retry = generator.send(None)
+    assert retry.input == body
+    generator.close()
+    record = json.loads(
+        next(
+            record.getMessage().split("WORKFLOW_RESUME_FAILURE ", 1)[1]
+            for record in caplog.records
+            if "WORKFLOW_RESUME_FAILURE " in record.getMessage()
+        )
+    )
+    assert record["runId"] == run_id
+    assert record["stepId"] == "await-cancellation"
+    assert record["operation"] == "delete"
+    assert record["attempt"] == 1
+    assert "private" not in caplog.text
 
 
 def _metadata() -> GraphMetadata:

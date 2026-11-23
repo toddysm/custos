@@ -155,6 +155,13 @@ class StartRunValidator:
         self._catalog: CatalogClient = catalog
         self._ledger: IdempotencyLedger = ledger
 
+    def require_execution_catalog(self) -> None:
+        """Fail activation rather than defer missing scoped Catalog wiring to the first start."""
+        if not isinstance(self._catalog, ExecutionCatalogClient):
+            from custos_workflow.runs.errors import WorkflowRuntimeUnavailableError
+
+            raise WorkflowRuntimeUnavailableError("execution-aware Catalog is not configured")
+
     async def validate_start_run(
         self,
         *,

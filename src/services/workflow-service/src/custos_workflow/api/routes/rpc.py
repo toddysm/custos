@@ -1,12 +1,10 @@
 """Internal RPC routes for the ``Run`` resource (WF-IMPL-067 + WF-IMPL-068).
 
-Per ``design.md`` § Internal RPC, internal callers (today the
-Trigger Service; tomorrow any in-cluster sibling) reach the Run
-Controller through a flat ``/internal/`` URL prefix rather than
-the public ``/v1/workspaces/{ws}/`` shape. The prefix is the seam
-the Helm chart / mesh uses to pin mTLS-only access; the actual
-mTLS gate lands with the API Gateway integration (see
-``design/components/workflow-service/todos.md``).
+The Trigger Service reaches the Run Controller through ``/internal/`` rather
+than the public ``/v1/workspaces/{ws}/`` shape. In enforced mode middleware
+requires the exact authenticated Trigger app/namespace and an Auth-signed
+operation context. Cancellation requires ``workflow-cancel`` / ``run:cancel``;
+start/resume grants and public Gateway contexts cannot substitute for it.
 
 Three RPC verbs land in this module:
 
@@ -136,7 +134,7 @@ def _delivery_controller(request: Request) -> TriggerDeliveryController | None:
 
 
 def _delivery_scope(ctx: CallContext, workspace_id: str) -> None:
-    """Authorize scope before looking up an original receipt or runtime instance."""
+    """Bind the body to available caller scope before receipts, run lookup or runtime work."""
     if ctx.workspace is not None and ctx.workspace != workspace_id:
         raise WorkspaceUnauthorizedError(
             "delivery workspace does not match call context",
@@ -219,8 +217,8 @@ async def start_run(
     The body's ``workspaceId`` is the authoritative workspace
     identifier for the run (the path carries none). Validator +
     controller see it as if it had arrived through the public
-    REST surface; auth / mTLS gating is the caller's
-    responsibility upstream of this route.
+    REST surface. Enforced middleware authenticates the exact Trigger
+    operation and the handler checks its body workspace before dispatch.
     """
     effective_key = resolve_idempotency_key(
         body_key=body.idempotency_key,
@@ -290,7 +288,7 @@ async def start_run(
 async def cancel_run(
     body: Annotated[InternalCancelRunRequest, Body(...)],
     controller: Annotated[RunController, Depends(get_run_controller)],
-    _ctx: Annotated[CallContext, Depends(get_call_context)],
+    ctx: Annotated[CallContext, Depends(get_call_context)],
     run_id: Annotated[
         str,
         Path(
@@ -301,8 +299,8 @@ async def cancel_run(
 ) -> RunRefResponse:
     """Forward an Internal-RPC cancellation request to the runtime.
 
-    The body's ``workspaceId`` is the authoritative workspace
-    identifier (the path carries none); ``reason`` is plumbed
+    The body's ``workspaceId`` must match the verified caller's workspace
+    before any run lookup (the path carries none); ``reason`` is plumbed
     through to
     :meth:`~custos_workflow.runs.controller.RunController.cancel_run`
     unchanged. Unknown run ids surface the
@@ -314,6 +312,7 @@ async def cancel_run(
     controller — the route returns 202 with the run's current
     :class:`RunRef` without re-issuing the terminate.
     """
+    _delivery_scope(ctx, body.workspace_id)
     ref = await controller.cancel_run(
         workspace_id=body.workspace_id,
         run_id=RunId(run_id),

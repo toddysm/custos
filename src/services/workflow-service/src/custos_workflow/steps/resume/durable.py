@@ -3,15 +3,22 @@
 All persistence and Trigger calls execute as activities on the application's
 own async loop. The orchestrator yields only durable tasks. A step-scoped event
 must be acknowledged against its immutable receipt before becoming step output.
+Failure records contain only bounded identity, taxonomy/status and source frames,
+leaving durable inputs, retries and exception outcomes unchanged.
 """
 
 from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 import logging
+import re
+import traceback
 from collections.abc import Callable, Generator, Mapping
+from concurrent.futures import CancelledError, Future
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 from custos_callctx.execution import ExecutionIdentity
@@ -27,7 +34,13 @@ from custos_spl.interfaces.delivery import (
 )
 from custos_spl.interfaces.trigger_source import ResumeSource
 from dapr.ext.workflow import TaskFailedError, when_any
+from grpc import Call, RpcError, StatusCode
 
+from custos_workflow.clients._errors import (
+    LOCKED_OUTBOUND_RPC_KINDS,
+    OutboundRpcError,
+    OutboundRpcStatusError,
+)
 from custos_workflow.clients.trigger import (
     CancelResumeSubscriptionRequest,
     RegisterResumeSubscriptionRequest,
@@ -54,6 +67,65 @@ from custos_workflow.steps.resume.mirror import ResumeSubscriptionMirror
 
 RESUME_EFFECT_ACTIVITY = "custos.workflow.resume.v2"
 logger = logging.getLogger(__name__)
+
+
+def _log_resume_failure(
+    body: Mapping[str, Any],
+    error: BaseException,
+    *,
+    phase: str,
+    attempt: int | None = None,
+    run_id: object = None,
+    step_id: object = None,
+    task_id: object = None,
+) -> None:
+    """Correlate a failure using closed taxonomy/status and source frames, never error values."""
+    operation = body.get("operation")
+    if not isinstance(operation, str) or operation not in {
+        "persist",
+        "register",
+        "ack",
+        "wait",
+        "cancel",
+        "delete",
+    }:
+        operation = "unknown"
+    identity = body.get("mirror" if operation == "persist" else "request")
+    if not isinstance(identity, Mapping):
+        identity = body
+
+    def token(value: object) -> str:
+        """Keep bounded opaque identifiers; mark missing or invalid correlation explicitly."""
+        return (
+            value
+            if isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,100}", value)
+            else "unavailable"
+        )
+
+    status = error.code() if isinstance(error, RpcError) and isinstance(error, Call) else None
+    record = {
+        "runId": token(identity.get("runId", run_id)),
+        "stepId": token(identity.get("stepId", step_id)),
+        "taskId": task_id if type(task_id) is int and 0 <= task_id <= 100000 else None,
+        "operation": operation,
+        "phase": phase,
+        "attempt": attempt,
+        "errorType": token(type(error).__name__),
+        "kind": error.kind
+        if isinstance(error, OutboundRpcError) and error.kind in LOCKED_OUTBOUND_RPC_KINDS
+        else None,
+        "httpStatus": error.status_code if isinstance(error, OutboundRpcStatusError) else None,
+        "grpcStatus": status.name if isinstance(status, StatusCode) else None,
+        "frames": [
+            {
+                "file": token(Path(frame.filename).stem) + ".py",
+                "line": frame.lineno,
+                "function": token(frame.name),
+            }
+            for frame in traceback.extract_tb(error.__traceback__)[-5:]
+        ],
+    }
+    logger.warning("WORKFLOW_RESUME_FAILURE %s", json.dumps(record, separators=(",", ":")))
 
 
 class DurableResumeMirrorRepository:
@@ -213,14 +285,31 @@ def build_resume_activity(
             running = None
         if running is loop:
             raise RuntimeError("durable resume activities must run on worker threads")
-        return asyncio.run_coroutine_threadsafe(handler.execute(body), loop).result()
+        future = asyncio.run_coroutine_threadsafe(handler.execute(body), loop)
+
+        def log_failure(completed: Future[object]) -> None:
+            """Record the async failure without changing the exception delivered to the worker."""
+            error = CancelledError() if completed.cancelled() else completed.exception()
+            if error is not None:
+                _log_resume_failure(
+                    body,
+                    error,
+                    phase="activity",
+                    run_id=getattr(_context, "workflow_id", None),
+                    task_id=getattr(_context, "task_id", None),
+                )
+
+        future.add_done_callback(log_failure)
+        return future.result()
 
     activity.requires_async_bridge = True  # type: ignore[attr-defined]
     return activity
 
 
-def _activity(ctx: WorkflowContext, body: Mapping[str, Any]) -> Generator[Any, Any, Any]:
-    """Retry transient durable effects with durable timers, not thread sleeps or inline I/O."""
+def _activity(
+    ctx: WorkflowContext, body: Mapping[str, Any], *, step_id: str | None = None
+) -> Generator[Any, Any, Any]:
+    """Retry with durable timers and log non-replay failures without changing activity inputs."""
     operation = body["operation"]
     attempts = (
         None if operation in {"ack", "cancel", "delete"} else 1 if operation == "register" else 5
@@ -234,12 +323,32 @@ def _activity(ctx: WorkflowContext, body: Mapping[str, Any]) -> Generator[Any, A
             return result
         except (TaskFailedError, BackendUnavailable, OSError) as exc:
             attempt += 1
+            if not ctx.is_replaying:
+                _log_resume_failure(
+                    body,
+                    exc,
+                    phase="retry",
+                    attempt=attempt,
+                    run_id=ctx.instance_id,
+                    step_id=step_id,
+                )
             if attempts is not None and attempt >= attempts:
                 raise
             ctx.set_custom_status(f"resume.{operation}.pending")
             if not ctx.is_replaying:
                 logger.warning("Durable resume %s pending after %s", operation, type(exc).__name__)
             yield ctx.create_timer(timedelta(seconds=min(2 ** min(attempt - 1, 6), 60)))
+        except (RpcError, RuntimeError, TypeError, AttributeError, ValueError, KeyError) as exc:
+            if not ctx.is_replaying:
+                _log_resume_failure(
+                    body,
+                    exc,
+                    phase="unhandled",
+                    attempt=attempt + 1,
+                    run_id=ctx.instance_id,
+                    step_id=step_id,
+                )
+            raise
 
 
 def _cleanup_wait(
@@ -266,6 +375,7 @@ def _cleanup_wait(
             "operation": "delete",
             "mirrorId": mirror.mirror_id,
         },
+        step_id=mirror.step_id,
     )
 
 
@@ -275,7 +385,11 @@ def drive_durable_resume(
     graph: ExecutionGraph,
     step_id: str,
 ) -> Generator[Any, Any, StepResult]:
-    """Drive every wait effect and bind only a validated, durably acknowledged step-scoped event."""
+    """Drive wait effects, logging lazy handler failures before unchanged propagation.
+
+    Replay suppresses diagnostics; activity inputs, retries and acknowledged
+    step-scoped event binding are unchanged.
+    """
     ctx = step.workflow_context
     gen = handler.iter_resume(step, graph, step_id, delivery_protocol=2)
     sent: object = None
@@ -283,6 +397,7 @@ def drive_durable_resume(
     workspace, run_id = step.workspace_id, str(step.run_id)
     registration_failures = 0
     active_mirror: ResumeSubscriptionMirror | None = None
+    operation = "unknown"
     while True:
         try:
             if pending is None:
@@ -294,7 +409,32 @@ def drive_durable_resume(
             if isinstance(stop.value, StepFailed) and active_mirror is not None:
                 yield from _cleanup_wait(ctx, active_mirror)
             return stop.value  # type: ignore[no-any-return]
+        except (
+            TaskFailedError,
+            BackendUnavailable,
+            OSError,
+            ValueError,
+            KeyError,
+            RpcError,
+            RuntimeError,
+            TypeError,
+            AttributeError,
+        ) as exc:
+            if not ctx.is_replaying:
+                _log_resume_failure(
+                    {"runId": run_id, "stepId": step_id, "operation": operation},
+                    exc,
+                    phase="generator",
+                )
+            raise
         sent = None
+        operation = {
+            PersistMirrorCall: "persist",
+            RegisterResumeSubscriptionCall: "register",
+            WaitForExternalEventCall: "wait",
+            CancelResumeSubscriptionCall: "cancel",
+            DeleteMirrorCall: "delete",
+        }.get(type(token), "unknown")
         try:
             base: dict[str, Any] = {"workspaceId": workspace}
             if isinstance(token, PersistMirrorCall):
@@ -376,6 +516,7 @@ def drive_durable_resume(
                 acknowledged = yield from _activity(
                     ctx,
                     {**base, "operation": "ack", "deliveryKey": key, "requestHash": fingerprint},
+                    step_id=step_id,
                 )
                 if acknowledged != {"status": "acknowledged"}:
                     raise ValueError("resume receipt rejected the acknowledgement")
@@ -393,11 +534,19 @@ def drive_durable_resume(
                 )
             elif isinstance(token, DeleteMirrorCall):
                 yield from _activity(
-                    ctx, {**base, "operation": "delete", "mirrorId": token.mirror_id}
+                    ctx,
+                    {**base, "operation": "delete", "mirrorId": token.mirror_id},
+                    step_id=step_id,
                 )
             else:
                 raise TypeError("unknown durable resume effect")
         except (TaskFailedError, BackendUnavailable, OSError, ValueError, KeyError) as exc:
+            if not ctx.is_replaying:
+                _log_resume_failure(
+                    {"runId": run_id, "stepId": step_id, "operation": operation},
+                    exc,
+                    phase="driver",
+                )
             if isinstance(token, (CancelResumeSubscriptionCall, DeleteMirrorCall)):
                 logger.warning("Durable resume cleanup failed: %s", type(exc).__name__)
             if isinstance(token, RegisterResumeSubscriptionCall):
@@ -418,3 +567,11 @@ def drive_durable_resume(
                     }
                 )
             pending = exc
+        except (RpcError, RuntimeError, TypeError, AttributeError) as exc:
+            if not ctx.is_replaying:
+                _log_resume_failure(
+                    {"runId": run_id, "stepId": step_id, "operation": operation},
+                    exc,
+                    phase="unhandled",
+                )
+            raise
