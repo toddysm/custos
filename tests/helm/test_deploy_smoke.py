@@ -1186,6 +1186,111 @@ def test_dependency_records_reject_invalid_fields_and_ignore_other_requests() ->
             )
 
 
+def test_prehandler_jwks_failure_is_retained_from_ready_service_without_a_run(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Collect a real producer's pre-handler cause without a run, ignoring private extra fields."""
+    import httpx
+    from custos_workflow._public_diagnostics import log_public_start_failure
+
+    monkeypatch.setenv("NS", "custos-system")
+    correlation = "00000000-0000-5000-8000-000000000000"
+    url = "http://private/?credential=syntheticCredentialError"
+    with pytest.raises(httpx.HTTPStatusError) as raised:
+        httpx.Response(
+            500,
+            request=httpx.Request("GET", url),
+            text="syntheticPayloadException",
+        ).raise_for_status()
+    log_public_start_failure(
+        None,
+        correlation,
+        "jwks",
+        raised.value,
+        reason="jwks_unavailable",
+        response_status=503,
+    )
+    assert "private" not in caplog.text and "synthetic" not in caplog.text
+    record = json.loads(
+        caplog.records[-1].getMessage().split("WORKFLOW_PUBLIC_START_FAILURE ", 1)[1]
+    )
+    record.update(
+        message="syntheticPayloadException",
+        url=url,
+        kid="syntheticCredentialError",
+    )
+
+    def command(args: list[str]) -> str:
+        """Supply Ready-Workflow and client logs without accepting any private extra fields."""
+        if "job/" + public.RESOURCE in args:
+            prefix = public.REQUEST_PREFIX
+            assert isinstance(prefix, str)
+            return prefix + json.dumps(
+                {
+                    "sha": TAG,
+                    "correlationId": correlation,
+                    "method": "POST",
+                    "httpStatus": 503,
+                }
+            )
+        if "deployment/custos-workflow-service" in args and "workflow-service" in args:
+            return "\n".join(
+                "WARNING WORKFLOW_PUBLIC_START_FAILURE " + json.dumps(row)
+                for row in ({**record, "correlationId": "unrelated"}, record)
+            )
+        return ""
+
+    monkeypatch.setitem(sys.modules, "runtime", SimpleNamespace(command=command))
+    public.collect_failure_diagnostics(tmp_path / "evidence.json", TAG)
+    report = json.loads((tmp_path / "public-workflow-diagnostics.json").read_text())
+    assert report["collectionErrors"] == [] and report["candidateRuns"] == []
+    assert len(report["dependencyFailures"]) == 1
+    retained = report["dependencyFailures"][0]
+    assert (
+        retained["source"] == "workflow-service" and retained["attemptedRunId"] is None
+    )
+    assert retained["correlationId"] == correlation
+    assert retained["reason"] == "jwks_unavailable"
+    assert retained["responseStatus"] == 503 and retained["httpStatus"] == 500
+    assert retained["frames"] == record["frames"]
+    assert "synthetic" not in json.dumps(report) and "private" not in json.dumps(report)
+    assert not (tmp_path / "evidence.json").exists()
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("reason", "syntheticCredentialError"),
+        ("reason", None),
+        ("responseStatus", True),
+        ("responseStatus", 200),
+        ("runId", "00000000-0000-5000-8000-000000000000"),
+    ],
+)
+def test_auth_diagnostics_reject_malformed_reason_status_or_premature_run(
+    field: str, value: Any
+) -> None:
+    """Fail collection explicitly instead of retaining an invalid pre-handler causal record."""
+    correlation = "00000000-0000-5000-8000-000000000000"
+    record = {
+        "correlationId": correlation,
+        "phase": "jwks",
+        "reason": "jwks_unavailable",
+        "responseStatus": 503,
+        "errorType": "HTTPStatusError",
+        "httpStatus": 500,
+        field: value,
+    }
+    with pytest.raises(ValueError, match="invalid"):
+        public.dependency_failure_records(
+            "WORKFLOW_PUBLIC_START_FAILURE " + json.dumps(record),
+            {correlation},
+            "workflow-service",
+        )
+
+
 def test_resume_causal_records_are_correlated_and_allowlisted() -> None:
     """Retain only the candidate's typed status/source record, not extra remote/private fields."""
     run_id = "00000000-0000-5000-8000-000000000000"

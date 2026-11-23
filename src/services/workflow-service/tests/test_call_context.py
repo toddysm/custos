@@ -11,6 +11,7 @@ from typing import Any
 from unittest.mock import AsyncMock
 from uuid import UUID
 
+import httpx
 import jwt
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -882,6 +883,204 @@ def test_public_header_rejections_cannot_fall_back_to_legacy_identity(
     response = client.get("/v1/workspaces/ws/runs", headers=headers)
     assert response.status_code == status
     assert _handler_entries(client) == 0
+
+
+@pytest.mark.parametrize(
+    "failure,error_type,http_status",
+    [
+        ("status", "HTTPStatusError", 500),
+        ("transport", "ConnectError", None),
+        ("decode", "JSONDecodeError", None),
+        ("unknown", "unrecognized", None),
+    ],
+)
+def test_cold_jwks_failure_is_correlated_before_handler_and_recovers_without_post_retry(
+    monkeypatch: pytest.MonkeyPatch,
+    fake_run_components: RunComponents,
+    caplog: pytest.LogCaptureFixture,
+    failure: str,
+    error_type: str,
+    http_status: int | None,
+) -> None:
+    """Keep first-request key failures observable while preserving readiness and fail-closed503."""
+    from custos_callctx import dapr_http
+
+    from custos_workflow import create_app
+
+    key = Ed25519PrivateKey.generate()
+    public = base64.urlsafe_b64encode(key.public_key().public_bytes_raw()).decode().rstrip("=")
+    calls: list[httpx.Request] = []
+    marker = "syntheticCredentialError"
+    payload = "syntheticPayloadException"
+
+    def boundary(request: httpx.Request) -> httpx.Response:
+        """Fail one actual JWKS HTTP fetch, then publish the signing key for a later GET."""
+        calls.append(request)
+        assert request.headers["dapr-api-token"] == marker
+        if len(calls) == 1:
+            if failure == "status":
+                return httpx.Response(500, text=payload)
+            if failure == "transport":
+                raise httpx.ConnectError(payload, request=request)
+            if failure == "decode":
+                return httpx.Response(200, text=payload)
+            raise _PrivateMarkerError(payload)
+        return httpx.Response(
+            200,
+            json={"keys": [{"kty": "OKP", "crv": "Ed25519", "kid": "unit", "x": public}]},
+        )
+
+    factory = dapr_http.dapr_http_client
+
+    def http_client(*, timeout: float) -> httpx.AsyncClient:
+        """Retain production token scoping and default JWKS decoding over a hermetic boundary."""
+        return factory(
+            timeout=timeout,
+            env={"DAPR_API_TOKEN": marker},
+            transport=httpx.MockTransport(boundary),
+        )
+
+    monkeypatch.setattr(dapr_http, "dapr_http_client", http_client)
+    verifier = CallContextVerifier(
+        jwks_url="http://127.0.0.1:3500/v1.0/invoke/custos-auth/method/"
+        ".well-known/jwks.json?credential=" + marker
+    )
+    app = create_app(
+        require_call_context=True,
+        call_context_verifier=verifier,
+        run_components=fake_run_components,
+        app_api_token="unit-sidecar-token",
+        gateway_namespace="custos",
+        public_execution_enabled=False,
+    )
+    correlation = "00000000-0000-5000-8000-000000000000"
+    claims = _gateway_claims()
+    claims["permissions"] = ["workflow:execute", "run:read"]
+    headers = [
+        (name, value) for name, value in _gateway_headers(key, claims) if name != "x-correlation-id"
+    ]
+    headers.append(("x-correlation-id", correlation))
+    with TestClient(app) as client:
+        assert client.get("/readyz").status_code == 200 and calls == []
+        response = client.post(
+            "/v1/workspaces/ws/runs",
+            headers=headers,
+            json={"workflowVersionId": payload, "inputs": {"private": marker}},
+        )
+        assert response.status_code == 503
+        assert response.json() == {
+            "error": {"code": "callctx_invalid", "detail": "public context verification failed"}
+        }
+        assert len(calls) == 1
+        assert client.get("/readyz").status_code == 200 and len(calls) == 1
+        records = [
+            json.loads(record.getMessage().split("WORKFLOW_PUBLIC_START_FAILURE ", 1)[1])
+            for record in caplog.records
+            if "WORKFLOW_PUBLIC_START_FAILURE " in record.getMessage()
+        ]
+        assert len(records) == 1
+        record = records[0]
+        assert record["correlationId"] == correlation
+        assert record["correlationUnavailable"] is False
+        assert record["runId"] is None
+        assert record["phase"] == "jwks"
+        assert record["reason"] == "jwks_unavailable"
+        assert record["responseStatus"] == 503 and record["httpStatus"] == http_status
+        assert record["errorType"] == error_type
+        assert 1 <= len(record["frames"]) <= 5
+        assert all("/" not in frame["file"] for frame in record["frames"])
+        assert marker not in caplog.text and payload not in caplog.text
+        assert "_PrivateMarkerError" not in caplog.text
+        assert "credential=" not in caplog.text and "http://" not in caplog.text
+        assert client.get("/v1/workspaces/ws/runs", headers=headers).status_code == 200
+        assert len(calls) == 2
+
+
+@pytest.mark.parametrize(
+    "failure,status,reason",
+    [
+        ("mesh", 401, "mesh_unauthenticated"),
+        ("missing", 401, "missing_header"),
+        ("duplicate", 401, "duplicate_header"),
+        ("expired", 401, "expired"),
+        ("scope", 403, "scope_denied"),
+        ("route", 403, "route_denied"),
+    ],
+)
+def test_public_auth_rejections_retain_safe_reason_before_handler(
+    public_boundary: tuple[TestClient, Ed25519PrivateKey, CallContextVerifier],
+    caplog: pytest.LogCaptureFixture,
+    failure: str,
+    status: int,
+    reason: str,
+) -> None:
+    """Distinguish trust and scope failures without logging supplied identity or signed tokens."""
+    client, key, _ = public_boundary
+    claims = _gateway_claims()
+    if failure == "expired":
+        claims["exp"] = 1
+    elif failure == "scope":
+        claims["workspaceId"] = "other"
+    headers = [
+        (name, value) for name, value in _gateway_headers(key, claims) if name != "x-correlation-id"
+    ]
+    if failure in {"mesh", "missing"}:
+        excluded = "dapr-api-token" if failure == "mesh" else "x-custos-callctx"
+        headers = [(name, value) for name, value in headers if name != excluded]
+    elif failure == "duplicate":
+        headers.append(("x-custos-callctx", "syntheticCredentialError"))
+    correlation = "00000000-0000-5000-8000-000000000000"
+    headers.append(("x-correlation-id", correlation))
+    path = "/unknown" if failure == "route" else "/v1/workspaces/ws/runs"
+    response = client.get(path, headers=headers)
+    assert response.status_code == status and _handler_entries(client) == 0
+    records = [
+        json.loads(record.getMessage().split("WORKFLOW_PUBLIC_START_FAILURE ", 1)[1])
+        for record in caplog.records
+        if "WORKFLOW_PUBLIC_START_FAILURE " in record.getMessage()
+    ]
+    assert len(records) == 1
+    assert records[0]["correlationId"] == correlation
+    assert records[0]["phase"] == "authentication"
+    assert records[0]["reason"] == reason
+    assert records[0]["responseStatus"] == status
+    assert "syntheticCredentialError" not in caplog.text
+    assert "unit-sidecar-token" not in caplog.text
+    assert all(value not in caplog.text for name, value in headers if name == "x-custos-callctx")
+
+
+@pytest.mark.parametrize(
+    "correlations",
+    [
+        [],
+        ["syntheticCredentialError"],
+        [
+            "00000000-0000-5000-8000-000000000000",
+            "00000000-0000-5000-8000-000000000001",
+        ],
+    ],
+)
+def test_auth_diagnostics_mark_missing_invalid_or_duplicate_correlation_unavailable(
+    public_boundary: tuple[TestClient, Ed25519PrivateKey, CallContextVerifier],
+    caplog: pytest.LogCaptureFixture,
+    correlations: list[str],
+) -> None:
+    """Ambiguous or unvalidated caller correlation is never copied into diagnostic records."""
+    client, _, _ = public_boundary
+    response = client.get(
+        "/v1/workspaces/ws/runs",
+        headers=[("x-correlation-id", value) for value in correlations],
+    )
+    assert response.status_code == 401 and _handler_entries(client) == 0
+    records = [
+        json.loads(record.getMessage().split("WORKFLOW_PUBLIC_START_FAILURE ", 1)[1])
+        for record in caplog.records
+        if "WORKFLOW_PUBLIC_START_FAILURE " in record.getMessage()
+    ]
+    assert len(records) == 1
+    assert records[0]["correlationId"] is None
+    assert records[0]["correlationUnavailable"] is True
+    assert "syntheticCredentialError" not in caplog.text
 
 
 def test_public_wrong_signature_and_jwks_outage_remain_distinct(
