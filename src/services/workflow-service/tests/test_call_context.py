@@ -17,6 +17,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from custos_callctx import CallContextVerifier, InvalidCallContextError, InvalidReason, JwksCache
 from custos_callctx.execution import ExecutionBinding, ExecutionBindings, ExecutionIdentity
 from custos_spl.delivery_memory import MemoryDeliveryState
+from custos_spl.errors import BackendUnavailable, LeaseBusy, LeaseExpired, MigrationRequired
 from custos_spl.ids import WorkspaceId
 from custos_spl.interfaces.delivery import DeliveryStateProvider
 from fastapi import FastAPI
@@ -415,10 +416,15 @@ def test_public_start_keyless_requests_keep_distinct_uuid4_ids(
     assert len(catalog.calls) == 2
 
 
+class _PrivateMarkerError(ValueError):
+    """Model a private exception type that must not escape the closed diagnostic taxonomy."""
+
+
 @pytest.mark.parametrize(
     "error,status",
     [
         (ValueError("private-start-value"), 409),
+        (_PrivateMarkerError("private-start-value"), 409),
         (RunStateConflictError("private-start-value"), 409),
         (OutboundRpcStatusError("private-start-value", status_code=503), 503),
         (OutboundRpcTransportError("private-start-value"), 503),
@@ -432,7 +438,7 @@ def test_public_start_failure_logs_only_its_source(
     error: ValueError | RunStateConflictError,
     status: int,
 ) -> None:
-    """Upstream faults are unavailable; conflicts stay409 and neither logs private values."""
+    """Emit one bounded record: upstream faults are 503, conflicts 409, private types excluded."""
     client, key, components, _ = caller_start
 
     async def reject(request: ScheduleWorkflowRequest) -> str:
@@ -442,12 +448,18 @@ def test_public_start_failure_logs_only_its_source(
     monkeypatch.setattr(components.workflow_client, "schedule_new_workflow", reject)
     response = _start_public(client, key)
     assert response.status_code == status
-    assert (
-        f"PUBLIC_START_REJECTED run={derive_run_id('ws', 'public-key')} "
-        f"cause={type(error).__name__} origin=reject:"
-    ) in caplog.text
-    if isinstance(error, OutboundRpcStatusError):
-        assert "status=503" in caplog.text
+    records = [row for row in caplog.records if row.name == "custos_workflow.runs.public_start"]
+    assert len(records) == 1
+    assert records[0].getMessage().startswith("WORKFLOW_PUBLIC_START_FAILURE ")
+    record = json.loads(records[0].getMessage().split("WORKFLOW_PUBLIC_START_FAILURE ")[1])
+    assert record["runId"] == str(derive_run_id("ws", "public-key"))
+    assert record["phase"] == "durable-start"
+    assert record["errorType"] == (
+        "unrecognized" if isinstance(error, _PrivateMarkerError) else type(error).__name__
+    )
+    assert record["frames"][-1]["function"] == "reject"
+    assert record["httpStatus"] == (503 if isinstance(error, OutboundRpcStatusError) else None)
+    assert "_PrivateMarkerError" not in caplog.text
     assert "private-start-value" not in caplog.text
 
 
@@ -591,6 +603,79 @@ def test_public_replay_retains_original_binding_when_selection_becomes_ambiguous
     assert replay.status_code == 202 and replay.json()["runId"] == first.json()["runId"]
     assert len(catalog.calls) == 1
     assert _start_public(client, key, idempotency_key="new-key").status_code == 503
+
+
+def test_public_replay_missing_original_binding_never_retargets_or_schedules(
+    caller_start: tuple[TestClient, Ed25519PrivateKey, RunComponents, _CallerCatalog],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Removing the accepted caller binding returns 503 without changing or rescheduling work."""
+    client, key, components, catalog = caller_start
+    assert _start_public(client, key).status_code == 202
+    assert isinstance(client.app, FastAPI)
+    controller = components.trigger_delivery_controller
+    assert controller is not None and client.portal is not None
+    run_id = derive_run_id("ws", "public-key")
+    accepted = client.portal.call(controller.provider.get_workflow_start, WorkspaceId("ws"), run_id)
+    assert accepted is not None
+    client.app.state.public_run_starter = PublicRunStarter(
+        _caller_bindings(), controller, components.start_run_validator, timedelta(days=1)
+    )
+    schedule = AsyncMock()
+    monkeypatch.setattr(components.workflow_client, "schedule_new_workflow", schedule)
+
+    response = _start_public(client, key)
+    assert response.status_code == 503
+    assert response.json()["code"] == "workflow.workflow_runtime_unavailable"
+    assert len(catalog.calls) == 1
+    schedule.assert_not_awaited()
+    assert (
+        client.portal.call(controller.provider.get_workflow_start, WorkspaceId("ws"), run_id)
+        == accepted
+    )
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        BackendUnavailable("private-provider-value"),
+        LeaseBusy("private-provider-value"),
+        LeaseExpired("private-provider-value"),
+        MigrationRequired([("private-provider-value", 1)]),
+    ],
+)
+def test_public_start_provider_failure_prevents_acceptance_and_scheduling(
+    caller_start: tuple[TestClient, Ed25519PrivateKey, RunComponents, _CallerCatalog],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    error: BackendUnavailable | LeaseBusy | LeaseExpired | MigrationRequired,
+) -> None:
+    """Provider failures return bounded 503 diagnostics before validation or durable acceptance."""
+    client, key, components, catalog = caller_start
+    controller = components.trigger_delivery_controller
+    assert controller is not None and client.portal is not None
+    monkeypatch.setattr(controller.provider, "delivery_now", AsyncMock(side_effect=error))
+    schedule = AsyncMock()
+    monkeypatch.setattr(components.workflow_client, "schedule_new_workflow", schedule)
+
+    response = _start_public(client, key)
+    assert response.status_code == 503
+    assert response.json()["code"] == "workflow.workflow_runtime_unavailable"
+    assert catalog.calls == []
+    schedule.assert_not_awaited()
+    records = [row for row in caplog.records if row.name == "custos_workflow.runs.public_start"]
+    assert len(records) == 1
+    record = json.loads(records[0].getMessage().split("WORKFLOW_PUBLIC_START_FAILURE ")[1])
+    assert record["phase"] == "retention"
+    assert record["errorType"] == type(error).__name__
+    assert "private-provider-value" not in caplog.text
+    assert "private-provider-value" not in response.text
+    run_id = derive_run_id("ws", "public-key")
+    assert (
+        client.portal.call(controller.provider.get_workflow_start, WorkspaceId("ws"), run_id)
+        is None
+    )
+    assert client.portal.call(components.run_store.get_run, "ws", run_id) is None
 
 
 def test_public_start_recovers_lost_runtime_ack_without_another_catalog_read(

@@ -128,7 +128,7 @@ def create_app(
             from ``WF_AUTHZ_ENDPOINT``, independently of execution bindings.
         public_execution_enabled: Opt into caller-bound durable public starts,
             otherwise read strict ``WF_PUBLIC_EXECUTION_ENABLED`` (default false).
-            Disabled enforced public starts return503, never the legacy path.
+            Disabled enforced public starts return 503, never the legacy path.
         gateway_namespace: Authenticated Dapr Gateway namespace, defaulting to
             ``WF_GATEWAY_NAMESPACE``. Required with public verification.
         gateway_app_id: Deployment-owned Dapr Gateway app identity.

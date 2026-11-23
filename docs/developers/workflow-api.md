@@ -116,14 +116,14 @@ separate from inbound verification and requires the existing execution registry,
 durable provider and scoped Catalog/runtime wiring. Invalid enabled configuration
 fails activation. Managed deployments expose the opt-in as
 `global.receiverRuntime.publicExecutionEnabled` (default `false`).
-With enforced authentication and the gate disabled, new public starts return503;
+With enforced authentication and the gate disabled, new public starts return 503;
 reads and cancellation do not require execution bindings. There is no production
 fallback to the unscoped development controller.
 
 Provision exactly one binding for the verified caller's principal **and target
 workspace**, plus a separate server-side credential for that same service account
 through the existing execution secret boundary. Workspace defaults are not public
-selection policy. Missing or ambiguous bindings return503. Auth checks each
+selection policy. Missing or ambiguous bindings return 503. Auth checks each
 downstream operation against that account's actual grants: `workflow:execute`
 alone does not imply Catalog read or Connector bind authority. No roles are added
 automatically, and incoming bearer tokens are never retained for execution.
@@ -134,10 +134,10 @@ workspace-scoped service-account execution, not human/OIDC delegation or
 execution as a different account. Cross-workspace administrators must use a
 provisioned caller account in the target workspace.
 
-New runs atomically persist their non-secret binding reference with protocol3
+New runs atomically persist their non-secret binding reference with protocol 3
 runtime input. Retries, children and waits retain that pin; credential rotation
 cannot retarget accepted work. A conflicting caller or payload under an accepted
-key returns409, while missing original bindings fail explicitly rather than
+key returns 409, while missing original bindings fail explicitly rather than
 selecting a new default. Legacy entries are not silently migrated. Keyed UUIDv5
 and keyless UUIDv4 run IDs and body-over-header key precedence are preserved.
 
@@ -439,8 +439,8 @@ Mixed/incomplete production configurations fail closed.
 }
 ```
 
-The existing controller returns202 with a RunRef,404 for a missing run,409 for
-an invalid terminal transition and503 for dependency/runtime failure.
+The existing controller returns 202 with a RunRef, 404 for a missing run, 409 for
+an invalid terminal transition and 503 for dependency/runtime failure.
 `cancelling` is in progress, not terminal evidence; only `cancelled` confirms
 the terminal controller state. This does not introduce an autonomous Trigger
 cancellation policy or a new cancellation state machine.
@@ -609,7 +609,7 @@ bind against.
 | `WF_AUTHZ_ENDPOINT` | Production | — | Auth base URL supplying `/.well-known/jwks.json`; configuring it enables public signed verification even without execution bindings or the legacy flag. |
 | `APP_API_TOKEN` | With signed verification | — | Secret shared with the local Dapr sidecar, never the public client. |
 | `WF_GATEWAY_NAMESPACE` | With signed verification | — | Exact authenticated Dapr namespace of `api-gateway`. The managed receiver overlay projects the release namespace. |
-| `WF_PUBLIC_EXECUTION_ENABLED` | No | `false` | Strict boolean opt-in for caller-bound durable public starts. Requires matching caller bindings and execution-aware dependencies; disabled enforced starts return503, not legacy fallback. |
+| `WF_PUBLIC_EXECUTION_ENABLED` | No | `false` | Strict boolean opt-in for caller-bound durable public starts. Requires matching caller bindings and execution-aware dependencies; disabled enforced starts return 503, not legacy fallback. |
 | `WF_IDEMPOTENCY_KEY_TTL` | No | `PT24H` | ISO-8601 duration window for `(workspaceId, idempotencyKey)` dedup. Months/years are rejected (the resulting calendar-dependent window is incompatible with the ledger contract). |
 | `WF_CATALOG_ENDPOINT` | Yes (production) | — | Catalog Service endpoint the validator's `CatalogClient` resolves `workflowVersionId` against. |
 | `WF_ARM_ENDPOINT` | Yes (production) | — | Activity Runtime Manager Dapr app-id the outbound ARM adapter resolves `schedule_activity` / `cancel_activity` calls against. When unset, the workflow-service falls back to the in-process `NoopActivityRuntimeClient` so the dev / test path stays sidecar-free. |

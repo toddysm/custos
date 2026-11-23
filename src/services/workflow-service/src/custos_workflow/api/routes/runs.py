@@ -197,8 +197,8 @@ async def start_run(
 
     Returns ``202 Accepted`` with the caller-facing
     :class:`RunRefResponse` handle. Caller-bound starts persist immutable
-    protocol3 inputs and recover accepted keyed requests without selecting new
-    authority. Enforced starts fail with503 while disabled or not ready;
+    protocol 3 inputs and recover accepted keyed requests without selecting new
+    authority. Enforced starts fail with 503 while disabled or not ready;
     only the development path uses the legacy controller below.
     """
     effective_key = resolve_idempotency_key(

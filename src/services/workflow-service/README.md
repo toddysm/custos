@@ -102,7 +102,7 @@ Process bind:
 | `WF_AUTHZ_ENDPOINT` | Required for production | Auth base URL for shared JWKS verification; also enables signed public verification independently of background execution bindings. |
 | `APP_API_TOKEN` | Required with public verification | Local sidecar app token (Secret), never a client credential. |
 | `WF_GATEWAY_NAMESPACE` | Required with public verification | Exact authenticated namespace of Dapr app `api-gateway`. |
-| `WF_PUBLIC_EXECUTION_ENABLED` | `false` | Opt into caller-bound durable public starts. Requires one matching workspace/principal binding, a separately provisioned credential and execution-aware dependencies. Disabled enforced starts return503; reads/cancel remain independently available. |
+| `WF_PUBLIC_EXECUTION_ENABLED` | `false` | Opt into caller-bound durable public starts. Requires one matching workspace/principal binding, a separately provisioned credential and execution-aware dependencies. Disabled enforced starts return 503; reads/cancel remain independently available. |
 
 Public requests must carry a valid Auth-signed context over an authenticated
 Gateway Dapr invocation, with the exact route grant and URL workspace.
@@ -115,7 +115,7 @@ Missing production
 trust configuration fails at startup; see [Public authentication boundary](../../../docs/developers/workflow-api.md#public-authentication-boundary).
 Public starts never adopt the workspace background executor. The caller must be
 a provisioned service account in the target workspace; its actual grants govern
-each downstream operation. Public schemas stay unchanged, while protocol3
+each downstream operation. Public schemas stay unchanged, while protocol 3
 runtime inputs retain only the original non-secret execution reference. See
 [Caller-bound public execution](../../../docs/developers/workflow-api.md#caller-bound-public-execution)
 for provisioning restrictions, rollout and replay behavior.
