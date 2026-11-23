@@ -177,8 +177,9 @@ class PublicRunStarter:
         identity or payload. Only non-secret references enter runtime history.
         Upstream RPC faults are unavailable, not accepted-work conflicts. Failure
         diagnostics retain bounded request/run references, type/phase, source
-        locations and HTTP/gRPC status, never payload or exception text.
-        Fresh input-schema failures retain their original422 validation envelope.
+        locations and HTTP/gRPC status, never payload or exception text. Logged
+        rejections emit only this bounded record, without a second legacy warning.
+        Fresh input-schema failures retain their original 422 validation envelope.
         ``correlation_id`` is used only for bounded failure diagnostics, never
         identity selection, acceptance, scheduling or runtime input.
         """
@@ -235,15 +236,6 @@ class PublicRunStarter:
             raise
         except (ImmutableViolation, ValueError, RunStateConflictError) as exc:
             log_public_start_failure(str(run_id), correlation_id, phase, exc)
-            origin = traceback.extract_tb(exc.__traceback__)[-1]
-            logger.warning(
-                "PUBLIC_START_REJECTED run=%s cause=%s origin=%s:%d status=%s",
-                run_id,
-                type(exc).__name__,
-                origin.name,
-                origin.lineno,
-                exc.status_code if isinstance(exc, OutboundRpcStatusError) else None,
-            )
             if isinstance(exc, OutboundRpcError):
                 raise WorkflowRuntimeUnavailableError(
                     "public execution Catalog is unavailable"
