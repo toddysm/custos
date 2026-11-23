@@ -159,6 +159,20 @@ only bounded phase/status/source fields, never bearer/context tokens, request
 bodies or raw error messages; see the
 [failure-evidence procedure](workflow-resume-subscriptions.md#deterministic-registration-time-and-failure-evidence).
 
+At the Gateway's `dapr-route` boundary, `errorType` retains a closed transport
+exception type. For upstream 5xx responses, `responseEnvelope` distinguishes a
+`dapr-error-envelope`, `workflow-error-envelope`, or `unrecognized` body before
+the unchanged public 503 masking. `upstreamErrorCode` retains only
+`ERR_DIRECT_INVOKE`, `ERR_APP_CHANNEL_NIL`, or
+`workflow.workflow_runtime_unavailable` with the matching envelope.
+Only error JSON of at most 16 KiB is inspected; oversized, malformed and
+ambiguous bodies are unrecognized and no body or message is retained.
+Null envelope/code fields indicate unavailable evidence, including transport
+failures and legacy records. The collector validates these pairings against
+the request correlation. An observed envelope shape is **not proof of its origin
+or the underlying cause**; missing Workflow records do not prove handler entry
+never occurred, and a healthy later run cannot explain an earlier 503.
+
 #### Authentication failures before handler entry
 
 `WORKFLOW_PUBLIC_START_FAILURE` also covers public middleware rejections, before

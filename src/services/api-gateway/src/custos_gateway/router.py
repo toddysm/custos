@@ -22,12 +22,13 @@ headers on the forwarded call.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, Literal
 
 import httpx
 
-from custos_gateway._telemetry import log_dependency_failure
+from custos_gateway._telemetry import DEPENDENCY_UPSTREAM_CODES, log_dependency_failure
 from custos_gateway.clients.auth import (
     DEFAULT_DAPR_HTTP_HOST,
     DEFAULT_DAPR_HTTP_PORT,
@@ -72,6 +73,34 @@ HOP_BY_HOP_HEADERS: Final[frozenset[str]] = frozenset(
 #: A downstream response at or above this status is treated as a transient
 #: server-side failure and masked as ``503 downstream-unavailable``.
 _TRANSIENT_STATUS_FLOOR: Final[int] = 500
+_FAILURE_RESPONSE_LIMIT_BYTES: Final[int] = 16 * 1024
+
+
+def _failure_response_evidence(
+    response: httpx.Response,
+) -> tuple[Literal["dapr-error-envelope", "workflow-error-envelope", "unrecognized"], str | None]:
+    """Classify bounded error JSON without retaining its content or claiming origin.
+
+    Malformed, oversized or ambiguous envelopes remain explicitly unrecognized.
+    Only allowlisted root codes survive; response text never enters diagnostics.
+    The bound applies to the already received, decoded body, not transport memory.
+    """
+    if len(response.content) > _FAILURE_RESPONSE_LIMIT_BYTES:
+        return "unrecognized", None
+    try:
+        body = json.loads(response.content.decode("utf-8"))
+    except (ValueError, RecursionError):
+        return "unrecognized", None
+    if not isinstance(body, dict) or ("errorCode" in body and "code" in body):
+        return "unrecognized", None
+    dapr_code = body.get("errorCode")
+    if isinstance(dapr_code, str) and dapr_code in DEPENDENCY_UPSTREAM_CODES - {
+        "workflow.workflow_runtime_unavailable"
+    }:
+        return "dapr-error-envelope", dapr_code
+    if body.get("code") == "workflow.workflow_runtime_unavailable":
+        return "workflow-error-envelope", "workflow.workflow_runtime_unavailable"
+    return "unrecognized", None
 
 
 def is_transient_status(status_code: int) -> bool:
@@ -163,6 +192,9 @@ class DownstreamRouter:
                 cannot be reached (transport error) or the downstream returns a
                 ``5xx``. The ``correlationId`` is attached by the exception
                 handler from ``request.state``.
+
+        Failure diagnostics distinguish allowlisted transport types and bounded
+        upstream envelope shapes before masking; they do not establish origin.
         """
         endpoint = DaprEndpoint(host=self.host, http_port=self.http_port, app_id=call.app_id)
         url = build_invoke_url(endpoint, call.method_path)
@@ -180,7 +212,10 @@ class DownstreamRouter:
             )
         except httpx.HTTPError as exc:
             log_dependency_failure(
-                call.headers.get("x-correlation-id"), phase="dapr-route", kind="transport"
+                call.headers.get("x-correlation-id"),
+                phase="dapr-route",
+                kind="transport",
+                error_type=type(exc).__name__,
             )
             raise GatewayError(
                 GatewayErrorCode.DOWNSTREAM_UNAVAILABLE,
@@ -191,11 +226,14 @@ class DownstreamRouter:
             ) from exc
 
         if is_transient_status(response.status_code):
+            envelope, code = _failure_response_evidence(response)
             log_dependency_failure(
                 call.headers.get("x-correlation-id"),
                 phase="dapr-route",
                 kind="status",
                 http_status=response.status_code,
+                response_envelope=envelope,
+                upstream_error_code=code,
             )
             raise GatewayError(
                 GatewayErrorCode.DOWNSTREAM_UNAVAILABLE,

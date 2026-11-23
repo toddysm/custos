@@ -1096,6 +1096,8 @@ def dependency_failure_records(
 
     Pre-handler authentication failures require a fixed reason and explicit
     response status, separate from upstream HTTP status; they have no run ID.
+    Gateway envelope evidence uses a closed code/shape pairing; legacy or
+    transport-only records have no envelope. Shape alone does not prove origin.
     """
     prefix = (
         "GATEWAY_DEPENDENCY_FAILURE "
@@ -1212,6 +1214,31 @@ def dependency_failure_records(
             or (row["phase"] == "jwks") != (row.get("reason") == "jwks_unavailable")
         ):
             raise ValueError("authentication diagnostic has invalid reason or status")
+        envelope = row.get("responseEnvelope")
+        upstream_code = row.get("upstreamErrorCode")
+        envelope_codes: dict[str | None, set[str | None]] = {
+            None: {None},
+            "unrecognized": {None},
+            "dapr-error-envelope": {"ERR_DIRECT_INVOKE", "ERR_APP_CHANNEL_NIL"},
+            "workflow-error-envelope": {"workflow.workflow_runtime_unavailable"},
+        }
+        if (
+            (envelope is not None and not isinstance(envelope, str))
+            or envelope not in envelope_codes
+            or (upstream_code is not None and not isinstance(upstream_code, str))
+            or upstream_code not in envelope_codes[envelope]
+            or (
+                envelope is not None
+                and (
+                    source != "api-gateway"
+                    or row["phase"] != "dapr-route"
+                    or row.get("kind") != "status"
+                    or type(row.get("httpStatus")) is not int
+                    or not 500 <= row["httpStatus"] <= 599
+                )
+            )
+        ):
+            raise ValueError("dependency diagnostic has invalid envelope evidence")
         safe_frames = diagnostic_source_frames(row.get("frames", []))
         records.append(
             {
@@ -1230,6 +1257,14 @@ def dependency_failure_records(
                         "grpcStatus",
                     )
                 },
+                **(
+                    {
+                        "responseEnvelope": envelope,
+                        "upstreamErrorCode": upstream_code,
+                    }
+                    if source == "api-gateway"
+                    else {}
+                ),
                 **(
                     {
                         "reason": row["reason"],

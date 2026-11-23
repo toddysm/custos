@@ -1580,6 +1580,42 @@ def test_first_public_503_retains_request_correlated_gateway_cause(
     assert not output.exists()
 
 
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"responseEnvelope": "syntheticCredentialError"},
+        {"responseEnvelope": []},
+        {"upstreamErrorCode": "syntheticPayloadException"},
+        {"upstreamErrorCode": []},
+        {"upstreamErrorCode": "workflow.workflow_runtime_unavailable"},
+        {"phase": "auth-verify"},
+        {"kind": "transport"},
+        {"httpStatus": None},
+        {"httpStatus": 200},
+    ],
+)
+def test_dependency_collector_rejects_unclosed_envelope_evidence(
+    override: dict[str, Any],
+) -> None:
+    """Reject private, malformed or mismatched envelope fields instead of retaining them."""
+    correlation = "00000000-0000-5000-8000-000000000000"
+    record = {
+        "correlationId": correlation,
+        "phase": "dapr-route",
+        "kind": "status",
+        "httpStatus": 503,
+        "responseEnvelope": "dapr-error-envelope",
+        "upstreamErrorCode": "ERR_DIRECT_INVOKE",
+        **override,
+    }
+    with pytest.raises(ValueError, match="invalid envelope evidence"):
+        public.dependency_failure_records(
+            "GATEWAY_DEPENDENCY_FAILURE " + json.dumps(record),
+            {correlation},
+            "api-gateway",
+        )
+
+
 def test_dependency_records_reject_invalid_fields_and_ignore_other_requests() -> None:
     """Only the selected request's closed taxonomy and source fields can reach the artifact."""
     correlation = "00000000-0000-5000-8000-000000000000"

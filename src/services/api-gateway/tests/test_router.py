@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import runpy
+from pathlib import Path
 
 import httpx
 import pytest
@@ -16,6 +18,10 @@ from custos_gateway.router import (
     is_transient_status,
     shape_response_headers,
 )
+
+
+class _UnrecognizedTransportError(httpx.HTTPError):
+    """Represent a private transport subtype outside the diagnostic allowlist."""
 
 
 def _router_with(handler: httpx.MockTransport) -> DownstreamRouter:
@@ -229,6 +235,117 @@ async def test_invoke_maps_transport_error_to_503(caplog: pytest.LogCaptureFixtu
     assert record["correlationUnavailable"] is True
     assert "syntheticCredentialError" not in caplog.text
     assert "syntheticCorrelationError" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    "body,envelope,code",
+    [
+        (
+            b'{"errorCode":"ERR_DIRECT_INVOKE","message":"syntheticCredentialError"}',
+            "dapr-error-envelope",
+            "ERR_DIRECT_INVOKE",
+        ),
+        (
+            b'{"errorCode":"ERR_APP_CHANNEL_NIL","message":"syntheticCredentialError"}',
+            "dapr-error-envelope",
+            "ERR_APP_CHANNEL_NIL",
+        ),
+        (
+            b'{"code":"workflow.workflow_runtime_unavailable","detail":"syntheticPayloadException"}',
+            "workflow-error-envelope",
+            "workflow.workflow_runtime_unavailable",
+        ),
+        (b'{"errorCode":"syntheticCredentialError"}', "unrecognized", None),
+        (b'{"errorCode":["ERR_DIRECT_INVOKE"]}', "unrecognized", None),
+        (
+            b'{"errorCode":"ERR_DIRECT_INVOKE","code":"workflow.workflow_runtime_unavailable"}',
+            "unrecognized",
+            None,
+        ),
+        (b"syntheticPayloadException", "unrecognized", None),
+        (b"[]", "unrecognized", None),
+        (b"\xff", "unrecognized", None),
+    ],
+)
+async def test_failure_envelope_survives_router_to_smoke_collector(
+    body: bytes, envelope: str, code: str | None, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Preserve only closed envelope evidence through both real diagnostic boundaries."""
+    router = _router_with(httpx.MockTransport(lambda request: httpx.Response(503, content=body)))
+    correlation = "00000000-0000-5000-8000-000000000000"
+    call = DownstreamCall(
+        "custos-workflow",
+        "POST",
+        "v1/workspaces/ws1/runs",
+        headers={"x-correlation-id": correlation},
+    )
+    with pytest.raises(GatewayError) as caught:
+        await router.invoke(call)
+    assert caught.value.status == 503
+    assert caught.value.code is GatewayErrorCode.DOWNSTREAM_UNAVAILABLE
+    collector = runpy.run_path(
+        str(Path(__file__).parents[4] / "tests/helm/smoke/public_workflow.py")
+    )["dependency_failure_records"]
+    records = collector(caplog.text, {correlation}, "api-gateway")
+    assert len(records) == 1
+    assert records[0]["responseEnvelope"] == envelope
+    assert records[0]["upstreamErrorCode"] == code
+    assert records[0]["httpStatus"] == 503
+    assert "synthetic" not in caplog.text
+    assert "synthetic" not in json.dumps(records)
+
+
+@pytest.mark.parametrize("extra_byte", [False, True])
+async def test_failure_envelope_inspection_has_exact_byte_bound(
+    extra_byte: bool, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Inspect a 16 KiB envelope but mark a one-byte-larger response unrecognized."""
+    encoded = b'{"errorCode":"ERR_DIRECT_INVOKE"}'
+    body = encoded + b" " * (16 * 1024 - len(encoded) + int(extra_byte))
+    router = _router_with(httpx.MockTransport(lambda request: httpx.Response(503, content=body)))
+    with pytest.raises(GatewayError):
+        await router.invoke(DownstreamCall("custos-workflow", "POST", "runs"))
+    record = json.loads(caplog.records[-1].getMessage().split("GATEWAY_DEPENDENCY_FAILURE ")[1])
+    assert record["responseEnvelope"] == ("unrecognized" if extra_byte else "dapr-error-envelope")
+    assert record["upstreamErrorCode"] == (None if extra_byte else "ERR_DIRECT_INVOKE")
+
+
+@pytest.mark.parametrize(
+    "error,expected",
+    [
+        (httpx.ConnectError, "ConnectError"),
+        (httpx.ReadTimeout, "ReadTimeout"),
+        (_UnrecognizedTransportError, "unrecognized"),
+    ],
+)
+async def test_transport_taxonomy_survives_router_to_collector(
+    error: type[httpx.HTTPError], expected: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Retain closed transport types and the original cause without exception text."""
+    cause = error("syntheticCredentialError")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        """Raise the same transport instance at the actual client seam."""
+        raise cause
+
+    router = _router_with(httpx.MockTransport(handler))
+    correlation = "00000000-0000-5000-8000-000000000000"
+    with pytest.raises(GatewayError) as caught:
+        await router.invoke(
+            DownstreamCall(
+                "custos-workflow", "POST", "runs", headers={"x-correlation-id": correlation}
+            )
+        )
+    assert caught.value.__cause__ is cause
+    assert caught.value.status == 503
+    collector = runpy.run_path(
+        str(Path(__file__).parents[4] / "tests/helm/smoke/public_workflow.py")
+    )["dependency_failure_records"]
+    record = collector(caplog.text, {correlation}, "api-gateway")[0]
+    assert record["errorType"] == expected
+    assert record["responseEnvelope"] is None
+    assert record["upstreamErrorCode"] is None
+    assert "synthetic" not in caplog.text
 
 
 # --- router defaults ---------------------------------------------------------
