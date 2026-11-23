@@ -680,7 +680,9 @@ def test_failed_public_job_reports_only_payload_free_rejection_locations(
         "rendered",
         lambda _: [{"kind": "Pod", "metadata": {"name": "custos-smoke-test"}}],
     )
-    monkeypatch.setitem(public.run.__globals__, "client_job", lambda *args: {})
+    monkeypatch.setitem(
+        public.run.__globals__, "client_job", lambda *args, **kwargs: {}
+    )
 
     def wait(job: dict[str, Any]) -> None:
         """Fail at the same orchestration boundary as an unsuccessful initial public Job."""
@@ -956,6 +958,14 @@ def test_live_wait_snapshot_requires_registered_exact_ttl_and_preserves_pin(
             asyncio.run(public.accepted_wait_snapshot(run_id, require_live_mirror=True))
     opened.assert_awaited_once()
     closed.assert_awaited_once()
+    if ttl_seconds == 300:
+        with pytest.raises(RuntimeError, match="left its durable wait mirror"):
+            asyncio.run(
+                public.accepted_wait_snapshot(
+                    run_id, require_live_mirror=False, require_no_mirror=True
+                )
+            )
+        assert closed.await_count == 2
 
 
 def test_collector_failure_does_not_replace_original_proof_error(
@@ -1268,3 +1278,222 @@ def test_private_proof_executes_only_in_an_actual_ready_tested_container(
         == "root"
     )
     assert len(executed) == 1
+
+
+@pytest.mark.parametrize("outcome_status", ["failed", "succeeded"])
+def test_controlled_event_uses_real_sdk_contract_and_requires_failed_step(
+    outcome_status: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SDK completion alone cannot pass the fault proof; require domain failure and removed mirror."""
+    from custos_spl.interfaces.delivery import resume_channel
+    from custos_workflow.runtime import dapr
+    from custos_workflow.runtime._common import RunStatus
+
+    run_id = "00000000-0000-5000-8000-000000000000"
+    client = AsyncMock(spec=dapr.WorkflowClient)
+    client.get_workflow_state.return_value = SimpleNamespace(
+        status=RunStatus.COMPLETED,
+        serialized_output=json.dumps(
+            {
+                "status": outcome_status,
+                "outputs": {},
+                "failed_step": "await-cancellation",
+                "failure_envelope": {"kind": "step.resume_delivery_failed"},
+            }
+        ),
+    )
+    monkeypatch.setattr(dapr, "WorkflowClient", Mock(return_value=client))
+    snapshot = AsyncMock(return_value="a" * 64)
+    monkeypatch.setitem(
+        public.controlled_wait_failure.__globals__, "accepted_wait_snapshot", snapshot
+    )
+    if outcome_status == "failed":
+        report = asyncio.run(public.controlled_wait_failure(run_id, TAG))
+        assert report["runtimeStatus"] == "completed"
+        assert report["stepOutcome"] == "failed"
+        assert report["mirrorCleanupVerified"] is True
+        assert not any(
+            marker in json.dumps(report) for marker in public.FAILURE_MARKERS
+        )
+        assert snapshot.await_args_list[-1].kwargs == {
+            "require_live_mirror": False,
+            "require_no_mirror": True,
+        }
+    else:
+        with pytest.raises(ValueError, match="intended wait step"):
+            asyncio.run(public.controlled_wait_failure(run_id, TAG))
+        assert snapshot.await_count == 1
+    client.raise_workflow_event.assert_awaited_once()
+    event = client.raise_workflow_event.await_args.args[0]
+    assert event.instance_id == run_id
+    assert event.event_name == resume_channel(
+        public.WORKSPACE, run_id, "await-cancellation", "never-sent"
+    )
+    assert event.data["deliveryProtocol"] == 1
+    assert all(marker in json.dumps(event.data) for marker in public.FAILURE_MARKERS)
+    client.aclose.assert_awaited_once()
+
+
+@pytest.mark.parametrize(
+    "fault",
+    [
+        "none",
+        "uncorrelated",
+        "missing-frame",
+        "collector-error",
+        "private-marker",
+        "stale",
+    ],
+)
+def test_controlled_failure_requires_complete_safe_causal_evidence(fault: str) -> None:
+    """Missing correlation, source frames, privacy or collection integrity cannot look successful."""
+    run_id = "00000000-0000-5000-8000-000000000000"
+    record = {
+        "runId": run_id,
+        "stepId": "await-cancellation",
+        "operation": "wait",
+        "phase": "driver",
+        "errorType": "ValueError",
+        "frames": [{"file": "durable.py", "function": "drive", "line": 1}],
+    }
+    report: dict[str, Any] = {
+        "sha": TAG,
+        "diagnosticOnly": True,
+        "lifecycleProofFailed": True,
+        "failedPhase": "controlled-wait-failure",
+        "causalFailures": [record],
+        "collectionErrors": [],
+    }
+    if fault == "uncorrelated":
+        record["runId"] = "different-run"
+    elif fault == "missing-frame":
+        record["frames"] = []
+    elif fault == "collector-error":
+        report["collectionErrors"] = [
+            {"source": "workflow-service", "errorType": "OSError"}
+        ]
+    elif fault == "private-marker":
+        report["serviceLogs"] = {"unexpected": public.FAILURE_MARKERS[0]}
+    elif fault == "stale":
+        report["sha"] = "b" * 40
+    if fault == "none":
+        public.verify_controlled_failure_diagnostics(report, run_id, TAG)
+    else:
+        with pytest.raises(ValueError):
+            public.verify_controlled_failure_diagnostics(report, run_id, TAG)
+
+
+def test_controlled_proof_keeps_public_projection_separate_and_uses_distinct_jobs(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A controlled proof reports failed output even when native public readback says succeeded."""
+    monkeypatch.setenv("NS", "custos-system")
+    monkeypatch.setenv("GITHUB_SHA", TAG)
+    monkeypatch.setenv("IMAGE_PREFIX", "localhost:5001/custos")
+    run_id = "00000000-0000-5000-8000-000000000000"
+    initial = {
+        "sha": TAG,
+        "runId": "completed-pure-workflow",
+        "cancellationRunId": run_id,
+        "publicWorkflowCompleted": True,
+        "publicReadbackVerified": True,
+        "fullReceiverCertification": False,
+    }
+    readback = {
+        "sha": TAG,
+        "runId": run_id,
+        "publicFailureReadbackObserved": True,
+        "publicStatus": "succeeded",
+    }
+    monkeypatch.setitem(
+        public.run.__globals__,
+        "rendered",
+        lambda _: [
+            {
+                "kind": "Pod",
+                "metadata": {"name": "custos-smoke-test", "labels": {}},
+                "spec": {},
+            }
+        ],
+    )
+    jobs: list[dict[str, Any]] = []
+    monkeypatch.setitem(public.run.__globals__, "wait_job", jobs.append)
+
+    def command(args: list[str]) -> str:
+        """Return only the selected owned Job's source-bound public report."""
+        resource = args[-1]
+        assert resource in {
+            "job/" + public.RESOURCE + "-failure",
+            "job/" + public.RESOURCE + "-failure-readback",
+        }
+        return f"{public.REPORT_PREFIX}{json.dumps(readback if resource.endswith('-readback') else initial)}"
+
+    def probe(service: str, phase: str, candidate: str, sha: str) -> dict[str, Any]:
+        """Model the separate registered-wait and actual failed-step observations."""
+        assert service == "workflow-service" and candidate == run_id and sha == TAG
+        if phase == "runtime-wait":
+            return {"liveWaitVerified": True, "acceptedInputHash": "a" * 64}
+        assert phase == "fail-wait"
+        return {
+            "sha": TAG,
+            "runId": run_id,
+            "controlledWaitFailureVerified": True,
+            "mirrorCleanupVerified": True,
+            "acceptedInputHash": "a" * 64,
+            "runtimeStatus": "completed",
+            "stepOutcome": "failed",
+            "failedStep": "await-cancellation",
+            "failureKind": "step.resume_delivery_failed",
+        }
+
+    def collect(output: Path, sha: str, **kwargs: Any) -> None:
+        """Persist failure-only evidence from the selected failure Job, never ordinary lifecycle logs."""
+        assert kwargs == {
+            "run_id": run_id,
+            "phase": "controlled-wait-failure",
+            "job_name": public.RESOURCE + "-failure",
+        }
+        output.with_name("public-workflow-diagnostics.json").write_text(
+            json.dumps(
+                {
+                    "sha": sha,
+                    "diagnosticOnly": True,
+                    "lifecycleProofFailed": True,
+                    "failedPhase": "controlled-wait-failure",
+                    "collectionErrors": [],
+                    "causalFailures": [
+                        {
+                            "runId": run_id,
+                            "stepId": "await-cancellation",
+                            "operation": "wait",
+                            "phase": "driver",
+                            "errorType": "ValueError",
+                            "frames": [
+                                {"file": "durable.py", "line": 1, "function": "drive"}
+                            ],
+                        }
+                    ],
+                }
+            )
+        )
+
+    monkeypatch.setitem(sys.modules, "runtime", SimpleNamespace(command=command))
+    monkeypatch.setitem(public.run.__globals__, "service_probe", probe)
+    monkeypatch.setitem(public.run.__globals__, "collect_failure_diagnostics", collect)
+    output = tmp_path / "controlled-failure-evidence.json"
+    public.run(output, tmp_path / "values.yaml", controlled_failure=True)
+    report = json.loads(output.read_text())
+    assert report["controlledFailureVerification"] is True
+    assert report["stepOutcome"] == "failed" and report["publicStatus"] == "succeeded"
+    assert report["original503CauseEstablished"] is False
+    assert "privateCancellationVerified" not in report
+    assert "publicWorkflowCompleted" not in report
+    assert report["pureWorkflowRunId"] == initial["runId"]
+    assert [job["metadata"]["name"] for job in jobs] == [
+        public.RESOURCE + "-failure",
+        public.RESOURCE + "-failure-readback",
+    ]
+    assert (
+        jobs[0]["spec"]["template"]["spec"]["containers"][0]["command"][-1]
+        == "failure-client"
+    )

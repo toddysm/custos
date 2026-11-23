@@ -6,7 +6,9 @@ credential, never database, Kubernetes or mesh credentials. Synthetic definition
 data does not replace Gateway/Auth/Dapr/Workflow transport or execution. A
 separate runner probe uses the actual Trigger container/sidecar for signed
 cancellation and the Workflow container's production client to confirm runtime
-termination; neither private authority is given to the public client.
+termination; neither private authority is given to the public client. An opt-in
+controlled invalid-event proof retains failed-step diagnostics separately from
+ordinary lifecycle success and the SDK's public status projection.
 """
 
 from __future__ import annotations
@@ -35,6 +37,7 @@ REPORT_PREFIX = "PUBLIC_WORKFLOW_EVIDENCE "
 DIAGNOSTIC_PREFIX = "PUBLIC_WORKFLOW_TERMINAL "
 CANDIDATE_PREFIX = "PUBLIC_WORKFLOW_CANDIDATE "
 REQUEST_PREFIX = "PUBLIC_WORKFLOW_REQUEST "
+FAILURE_MARKERS = ("synthetic-credential-Error", "synthetic-payload-Exception")
 DIAGNOSTIC_ERROR_TYPES = frozenset(
     {
         "WorkflowRuntimeUnavailableError",
@@ -228,8 +231,8 @@ def request(
     return payload
 
 
-def exercise() -> dict[str, Any]:
-    """Require actual runtime completion and public list/get readback, not just acceptance."""
+def exercise(*, controlled_failure: bool = False) -> dict[str, Any]:
+    """Require public completion/readback and a separate candidate for the selected wait proof."""
     prefix = f"/v1/workspaces/{WORKSPACE}/runs"
     started = request(
         "POST",
@@ -267,20 +270,23 @@ def exercise() -> dict[str, Any]:
         "publicWorkflowCompleted": True,
         "publicReadbackVerified": True,
         "runId": run_id,
-        "cancellationRunId": start_waiting_run(),
+        "cancellationRunId": start_waiting_run(controlled_failure=controlled_failure),
         "fullReceiverCertification": False,
     }
 
 
-def start_waiting_run() -> str:
-    """Record only accepted candidate identity, then require a running real Workflow."""
+def start_waiting_run(*, controlled_failure: bool = False) -> str:
+    """Require a running candidate; the failure fixture never reuses the cancelled run's key."""
     prefix = f"/v1/workspaces/{WORKSPACE}/runs"
     started = request(
         "POST",
         prefix,
         {
             "workflowVersionId": f"{WORKSPACE}/{WAITING_WORKFLOW}@1",
-            "idempotencyKey": WAITING_WORKFLOW + "-" + os.environ["GITHUB_SHA"],
+            "idempotencyKey": WAITING_WORKFLOW
+            + "-"
+            + os.environ["GITHUB_SHA"]
+            + ("-failure" if controlled_failure else ""),
         },
     )
     run_id = started.get("runId")
@@ -337,6 +343,32 @@ def cancellation_readback(run_id: str) -> dict[str, Any]:
             raise RuntimeError("cancellable Workflow ended without cancellation")
         time.sleep(2)
     raise RuntimeError("public cancellation readback never became terminal")
+
+
+def failure_readback(run_id: str) -> dict[str, Any]:
+    """Retain exact-fixture terminal public projection, not a claim of failed-step success."""
+    deadline = time.monotonic() + 120
+    while True:
+        observed = request("GET", f"/v1/workspaces/{WORKSPACE}/runs/{run_id}")
+        if (
+            observed.get("runId") != run_id
+            or observed.get("workspaceId") != WORKSPACE
+            or observed.get("workflowVersionId") != f"{WORKSPACE}/{WAITING_WORKFLOW}@1"
+        ):
+            raise ValueError("failure readback does not match the controlled wait")
+        status = observed.get("status")
+        if status in {"succeeded", "failed"}:
+            return {
+                "sha": os.environ["GITHUB_SHA"],
+                "runId": run_id,
+                "publicFailureReadbackObserved": True,
+                "publicStatus": status,
+            }
+        if status == "cancelled" or time.monotonic() >= deadline:
+            raise RuntimeError(
+                "controlled wait has no expected terminal public readback"
+            )
+        time.sleep(2)
 
 
 async def private_cancellation(run_id: str, sha: str) -> dict[str, Any]:
@@ -413,12 +445,15 @@ async def runtime_termination(run_id: str, sha: str) -> dict[str, Any]:
     }
 
 
-async def accepted_wait_snapshot(run_id: str, *, require_live_mirror: bool) -> str:
+async def accepted_wait_snapshot(
+    run_id: str, *, require_live_mirror: bool, require_no_mirror: bool = False
+) -> str:
     """Read the actual service's scoped durable state, returning a digest rather than payloads.
 
     Before cancellation require a registered, unexpired exact-fixture mirror.
-    After cancellation inspect only the immutable accepted snapshot; mirrors
-    may already have been removed. No database authority reaches the public Job.
+    After cancellation inspect only the immutable accepted snapshot. The controlled
+    failure proof additionally requires mirror removal. These requirements are
+    mutually exclusive. No database authority reaches the public Job.
     """
     from custos_callctx.execution import ExecutionIdentity
     from custos_spl.ids import WorkspaceId
@@ -428,6 +463,8 @@ async def accepted_wait_snapshot(run_id: str, *, require_live_mirror: bool) -> s
     from custos_workflow.steps.resume.durable import DurableResumeMirrorRepository
     from custos_workflow.steps.resume.handler import PENDING_TS_SUBSCRIPTION_ID
 
+    if require_live_mirror and require_no_mirror:
+        raise ValueError("wait cannot require both a live and removed mirror")
     dsn = _resolve_metadata_store_dsn(os.environ)
     if dsn is None:
         raise RuntimeError(
@@ -484,6 +521,12 @@ async def accepted_wait_snapshot(run_id: str, *, require_live_mirror: bool) -> s
                             )
                         break
                     await asyncio.sleep(1)
+            if require_no_mirror:
+                repository = DurableResumeMirrorRepository(provider, WORKSPACE)
+                if await repository.list_open_for_step(run_id, "await-cancellation"):
+                    raise RuntimeError(
+                        "controlled failure left its durable wait mirror"
+                    )
             return hashlib.sha256(saved.input_json.encode()).hexdigest()
     finally:
         await pool.aclose()
@@ -510,6 +553,91 @@ async def runtime_waiting(run_id: str, sha: str) -> dict[str, Any]:
         "runId": run_id,
         "liveWaitVerified": True,
         "acceptedInputHash": snapshot,
+    }
+
+
+async def controlled_wait_failure(run_id: str, sha: str) -> dict[str, Any]:
+    """Inject one invalid event through the real SDK; require failed output and native cleanup.
+
+    The SDK completes an orchestrator that returns a failed step. Retain that
+    distinction without promoting its COMPLETED status to domain success.
+    Synthetic payload markers must never reach diagnostic evidence.
+    """
+    from custos_spl.interfaces.delivery import resume_channel
+    from custos_workflow.runs.orchestrator import RunOutput
+    from custos_workflow.runtime._common import (
+        GetRunStateRequest,
+        RaiseRunEventRequest,
+        RunStatus,
+    )
+    from custos_workflow.runtime.dapr import WorkflowClient
+
+    snapshot = await accepted_wait_snapshot(run_id, require_live_mirror=True)
+    client = WorkflowClient()
+    try:
+        async with asyncio.timeout(60):
+            await client.raise_workflow_event(
+                RaiseRunEventRequest(
+                    instance_id=run_id,
+                    event_name=resume_channel(
+                        WORKSPACE, run_id, "await-cancellation", "never-sent"
+                    ),
+                    data={
+                        "deliveryProtocol": 1,
+                        "payload": {
+                            "credential": FAILURE_MARKERS[0],
+                            "payload": FAILURE_MARKERS[1],
+                        },
+                    },
+                )
+            )
+            while True:
+                state = await client.get_workflow_state(
+                    GetRunStateRequest(instance_id=run_id, fetch_payloads=True)
+                )
+                if state is not None and state.status == RunStatus.COMPLETED:
+                    if state.serialized_output is None:
+                        raise ValueError("controlled failure has no runtime outcome")
+                    raw: object = json.loads(state.serialized_output)
+                    if not isinstance(raw, dict):
+                        raise TypeError("controlled failure outcome must be an object")
+                    outcome = RunOutput.model_validate(raw)
+                    if (
+                        outcome.status != "failed"
+                        or outcome.failed_step != "await-cancellation"
+                        or outcome.failure_envelope is None
+                        or outcome.failure_envelope.get("kind")
+                        != "step.resume_delivery_failed"
+                    ):
+                        raise ValueError(
+                            "controlled event did not fail its intended wait step"
+                        )
+                    break
+                if state is not None and state.status in {
+                    RunStatus.FAILED,
+                    RunStatus.TERMINATED,
+                }:
+                    raise RuntimeError(
+                        "controlled wait ended with an unrelated runtime failure"
+                    )
+                await asyncio.sleep(1)
+    finally:
+        await client.aclose()
+    after = await accepted_wait_snapshot(
+        run_id, require_live_mirror=False, require_no_mirror=True
+    )
+    if after != snapshot:
+        raise ValueError("controlled failure changed the accepted wait snapshot")
+    return {
+        "sha": sha,
+        "runId": run_id,
+        "controlledWaitFailureVerified": True,
+        "runtimeStatus": state.status.value,
+        "stepOutcome": "failed",
+        "failedStep": outcome.failed_step,
+        "failureKind": outcome.failure_envelope["kind"],
+        "mirrorCleanupVerified": True,
+        "acceptedInputHash": after,
     }
 
 
@@ -564,9 +692,13 @@ async def runtime_diagnostics(run_id: str, sha: str) -> dict[str, Any]:
 
 
 def client_job(
-    public_pod: dict[str, Any], image: str, *, run_id: str | None = None
+    public_pod: dict[str, Any],
+    image: str,
+    *,
+    run_id: str | None = None,
+    controlled_failure: bool = False,
 ) -> dict[str, Any]:
-    """Reuse only the chart's public identity for initial execution or final cancellation readback."""
+    """Reuse public authority, with distinct Jobs and keys for ordinary and controlled proofs."""
     pod = copy.deepcopy(
         {
             "metadata": {"labels": public_pod["metadata"]["labels"]},
@@ -588,12 +720,16 @@ def client_job(
             "name": "client",
             "image": image,
             "command": (
-                ["python", "/smoke/public_workflow.py", "client"]
+                [
+                    "python",
+                    "/smoke/public_workflow.py",
+                    "failure-client" if controlled_failure else "client",
+                ]
                 if run_id is None
                 else [
                     "python",
                     "/smoke/public_workflow.py",
-                    "readback",
+                    "failure-readback" if controlled_failure else "readback",
                     "--run-id",
                     run_id,
                 ]
@@ -625,7 +761,11 @@ def client_job(
     return {
         "apiVersion": "batch/v1",
         "kind": "Job",
-        "metadata": {"name": RESOURCE if run_id is None else RESOURCE + "-readback"},
+        "metadata": {
+            "name": RESOURCE
+            + ("-failure" if controlled_failure else "")
+            + ("" if run_id is None else "-readback")
+        },
         "spec": {"backoffLimit": 0, "activeDeadlineSeconds": 300, "template": pod},
     }
 
@@ -895,11 +1035,12 @@ def collect_failure_diagnostics(
     *,
     run_id: str | None = None,
     phase: str = "public-execution",
+    job_name: str = RESOURCE,
 ) -> None:
     """Retain safe all-phase failure evidence, including known nonterminal candidates.
 
-    Collection errors are explicit. A candidate identity alone is not a terminal
-    observation or successful lifecycle proof.
+    Collection errors are explicit. The selected owned Job provides candidate
+    correlation; candidate identity alone is not terminal or successful proof.
     """
     import runtime as smoke
 
@@ -954,7 +1095,7 @@ def collect_failure_diagnostics(
             {"source": "public-start", "errorType": type(exc).__name__}
         )
     try:
-        logs = smoke.command(["kubectl", "-n", namespace, "logs", "job/" + RESOURCE])
+        logs = smoke.command(["kubectl", "-n", namespace, "logs", "job/" + job_name])
         requests: dict[str, dict[str, Any]] = {}
         for line in logs.splitlines():
             if line.startswith(REQUEST_PREFIX):
@@ -1283,13 +1424,44 @@ def resume_failure_records(logs: str, candidates: set[str]) -> list[dict[str, An
     return records
 
 
-def run(output: Path, values: Path) -> None:
-    """Require all real lifecycle effects; diagnostic failure never replaces the proof exception."""
+def verify_controlled_failure_diagnostics(
+    report: dict[str, Any], run_id: str, sha: str
+) -> None:
+    """Reject absent, uncorrelated, incomplete or marker-bearing controlled failure evidence."""
+    if (
+        report.get("sha") != sha
+        or report.get("diagnosticOnly") is not True
+        or report.get("lifecycleProofFailed") is not True
+        or report.get("failedPhase") != "controlled-wait-failure"
+        or report.get("collectionErrors") != []
+    ):
+        raise ValueError("controlled failure diagnostics are incomplete or stale")
+    records = report.get("causalFailures")
+    if not isinstance(records, list) or not any(
+        isinstance(record, dict)
+        and record.get("runId") == run_id
+        and record.get("stepId") == "await-cancellation"
+        and record.get("operation") == "wait"
+        and record.get("phase") == "driver"
+        and record.get("errorType") == "ValueError"
+        and diagnostic_source_frames(record.get("frames"))
+        for record in records
+    ):
+        raise ValueError("controlled wait has no correlated causal source evidence")
+    if any(marker in json.dumps(report) for marker in FAILURE_MARKERS):
+        raise ValueError(
+            "controlled failure diagnostics retained synthetic private data"
+        )
+
+
+def run(output: Path, values: Path, *, controlled_failure: bool = False) -> None:
+    """Require ordinary effects or explicit controlled-failure evidence; preserve proof errors."""
     import runtime as smoke
 
     namespace, sha = os.environ["NS"], os.environ["GITHUB_SHA"]
     run_id = None
     phase = "public-execution"
+    job_name = RESOURCE + ("-failure" if controlled_failure else "")
     try:
         documents = rendered(values)
         public = next(
@@ -1303,9 +1475,13 @@ def run(output: Path, values: Path) -> None:
         )
         if public is None:
             raise RuntimeError("rendered chart has no public smoke identity")
-        client = client_job(public, os.environ["IMAGE_PREFIX"] + "/api-gateway:" + sha)
+        client = client_job(
+            public,
+            os.environ["IMAGE_PREFIX"] + "/api-gateway:" + sha,
+            controlled_failure=controlled_failure,
+        )
         wait_job(client)
-        logs = smoke.command(["kubectl", "-n", namespace, "logs", "job/" + RESOURCE])
+        logs = smoke.command(["kubectl", "-n", namespace, "logs", "job/" + job_name])
         report = report_from_logs(logs, sha)
         run_id = report["cancellationRunId"]
         phase = "runtime-wait"
@@ -1318,6 +1494,89 @@ def run(output: Path, values: Path) -> None:
         ):
             raise ValueError("actual proof did not confirm the live accepted wait")
         report["liveWaitVerified"] = True
+        if controlled_failure:
+            phase = "controlled-wait-failure"
+            proof = service_probe("workflow-service", "fail-wait", run_id, sha)
+            if (
+                proof.get("controlledWaitFailureVerified") is not True
+                or proof.get("mirrorCleanupVerified") is not True
+                or proof.get("acceptedInputHash") != snapshot
+            ):
+                raise ValueError(
+                    "controlled wait failure did not retain its required effects"
+                )
+            collect_failure_diagnostics(
+                output, sha, run_id=run_id, phase=phase, job_name=job_name
+            )
+            diagnostics = json.loads(
+                output.with_name("public-workflow-diagnostics.json").read_text()
+            )
+            verify_controlled_failure_diagnostics(diagnostics, run_id, sha)
+            phase = "public-failure-readback"
+            readback = client_job(
+                public,
+                os.environ["IMAGE_PREFIX"] + "/api-gateway:" + sha,
+                run_id=run_id,
+                controlled_failure=True,
+            )
+            wait_job(readback)
+            observed = read_report(
+                smoke.command(
+                    [
+                        "kubectl",
+                        "-n",
+                        namespace,
+                        "logs",
+                        "job/" + job_name + "-readback",
+                    ]
+                ),
+                sha,
+            )
+            if (
+                observed.get("runId") != run_id
+                or observed.get("publicFailureReadbackObserved") is not True
+                or observed.get("publicStatus") not in {"succeeded", "failed"}
+            ):
+                raise ValueError(
+                    "controlled failure has no exact public terminal readback"
+                )
+            evidence = {
+                key: proof[key]
+                for key in (
+                    "sha",
+                    "runId",
+                    "runtimeStatus",
+                    "stepOutcome",
+                    "failedStep",
+                    "failureKind",
+                    "mirrorCleanupVerified",
+                    "acceptedInputHash",
+                    "controlledWaitFailureVerified",
+                )
+            }
+            evidence.update(
+                {
+                    "controlledFailureVerification": True,
+                    "acceptedInputUnchanged": True,
+                    "causalDiagnosticsVerified": True,
+                    "privacyMarkersExcluded": True,
+                    "publicStatus": observed["publicStatus"],
+                    "pureWorkflowRunId": report["runId"],
+                    "pureWorkflowCompleted": report["publicWorkflowCompleted"],
+                    "original503CauseEstablished": False,
+                    "fullReceiverCertification": False,
+                }
+            )
+            serialized = json.dumps(evidence, indent=2)
+            if any(marker in serialized for marker in FAILURE_MARKERS):
+                raise ValueError(
+                    "controlled verification retained synthetic private data"
+                )
+            output.write_text(serialized)
+            print(
+                "Controlled failed-step diagnostics verified; original 503 cause remains unknown."
+            )
+            return
         for service, probe_phase, field in (
             ("trigger-service", "cancel", "privateCancellationVerified"),
             ("workflow-service", "runtime-state", "runtimeTerminationVerified"),
@@ -1358,7 +1617,13 @@ def run(output: Path, values: Path) -> None:
         output.write_text(json.dumps(report, indent=2))
     except (RuntimeError, TypeError, ValueError, KeyError, OSError):
         try:
-            collect_failure_diagnostics(output, sha, run_id=run_id, phase=phase)
+            collect_failure_diagnostics(
+                output,
+                sha,
+                run_id=run_id,
+                phase=phase,
+                job_name=job_name,
+            )
         except (RuntimeError, TypeError, ValueError, KeyError, OSError) as exc:
             print(
                 json.dumps(
@@ -1386,6 +1651,7 @@ def main() -> None:
         choices=(
             "seed",
             "client",
+            "failure-client",
             "prepare",
             "run",
             "cancel",
@@ -1393,28 +1659,43 @@ def main() -> None:
             "runtime-wait",
             "diagnose",
             "readback",
+            "failure-readback",
+            "fail-wait",
         ),
     )
     parser.add_argument("--output", type=Path)
     parser.add_argument("--values", type=Path)
     parser.add_argument("--run-id")
     parser.add_argument("--sha")
+    parser.add_argument("--controlled-failure", action="store_true")
     args = parser.parse_args()
+    if args.controlled_failure and args.phase != "run":
+        parser.error("--controlled-failure is only valid for run")
     if args.phase == "seed":
         asyncio.run(seed())
-    elif args.phase == "client":
-        print(REPORT_PREFIX + json.dumps(exercise()), flush=True)
+    elif args.phase in {"client", "failure-client"}:
+        print(
+            REPORT_PREFIX
+            + json.dumps(exercise(controlled_failure=args.phase == "failure-client")),
+            flush=True,
+        )
     elif args.phase in {
         "cancel",
         "runtime-state",
         "runtime-wait",
         "diagnose",
         "readback",
+        "failure-readback",
+        "fail-wait",
     }:
         if args.run_id is None or re.fullmatch(r"[\w-]+", args.run_id) is None:
             parser.error("--run-id must be an opaque root run identifier")
-        if args.phase == "readback":
-            report = cancellation_readback(args.run_id)
+        if args.phase in {"readback", "failure-readback"}:
+            report = (
+                failure_readback(args.run_id)
+                if args.phase == "failure-readback"
+                else cancellation_readback(args.run_id)
+            )
         else:
             if args.sha is None or re.fullmatch(r"[a-f0-9]{40}", args.sha) is None:
                 parser.error("--sha must be the exact tested commit")
@@ -1424,6 +1705,8 @@ def main() -> None:
                 report = asyncio.run(runtime_diagnostics(args.run_id, args.sha))
             elif args.phase == "runtime-wait":
                 report = asyncio.run(runtime_waiting(args.run_id, args.sha))
+            elif args.phase == "fail-wait":
+                report = asyncio.run(controlled_wait_failure(args.run_id, args.sha))
             else:
                 report = asyncio.run(runtime_termination(args.run_id, args.sha))
         print(REPORT_PREFIX + json.dumps(report), flush=True)
@@ -1434,7 +1717,7 @@ def main() -> None:
     elif args.output is None or args.values is None:
         parser.error("--output and --values are required for run")
     else:
-        run(args.output, args.values)
+        run(args.output, args.values, controlled_failure=args.controlled_failure)
 
 
 if __name__ == "__main__":
