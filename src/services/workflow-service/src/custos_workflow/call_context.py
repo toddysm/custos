@@ -6,6 +6,7 @@ The shared verifier owns JWT/JWKS validation; this module never trusts plain
 identity headers when verification or mandatory context enforcement is enabled.
 The unsigned header shim remains available only for explicit development use.
 Health probes do not require identity.
+Public rejections emit bounded request-correlated diagnostics before handler entry.
 """
 
 from __future__ import annotations
@@ -27,6 +28,8 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import compile_path
+
+from custos_workflow._public_diagnostics import log_public_start_failure
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -191,10 +194,31 @@ class CallContextMiddleware(BaseHTTPMiddleware):
         return await call_next(request)
 
     async def _authenticate_public(self, request: Request) -> JSONResponse | None:
-        """Bind public identity or return a sanitized rejection without entering a handler."""
+        """Bind public identity or log a bounded cause and reject before entering a handler."""
+
+        def reject(
+            status: int, code: str, detail: str, reason: str, error: Exception | None = None
+        ) -> JSONResponse:
+            """Separate response/upstream status without retaining private metadata."""
+            correlations = request.headers.getlist("x-correlation-id")
+            log_public_start_failure(
+                None,
+                correlations[0] if len(correlations) == 1 else None,
+                "jwks" if reason == InvalidReason.JWKS_UNAVAILABLE else "authentication",
+                error,
+                reason=reason,
+                response_status=status,
+            )
+            return _envelope(status, code, detail)
+
         if self._verifier is None:
             logger.error("Public call-context verification is not configured")
-            return _envelope(503, "callctx_unavailable", "signed context verification is required")
+            return reject(
+                503,
+                "callctx_unavailable",
+                "signed context verification is required",
+                "verifier_unavailable",
+            )
         try:
             require_service_caller(
                 request.headers,
@@ -204,19 +228,26 @@ class CallContextMiddleware(BaseHTTPMiddleware):
             )
             contexts = request.headers.getlist(CALLCTX_HEADER)
             if not contexts:
-                return _envelope(401, "callctx_missing", "a signed Gateway context is required")
+                return reject(
+                    401, "callctx_missing", "a signed Gateway context is required", "missing_header"
+                )
             if len(contexts) != 1:
-                return _envelope(401, "callctx_invalid", "one signed Gateway context is required")
+                return reject(
+                    401,
+                    "callctx_invalid",
+                    "one signed Gateway context is required",
+                    "duplicate_header",
+                )
             verified = await self._verifier.verify(metadata=request.headers)
         except MeshAuthenticationError as exc:
-            logger.warning("Public caller rejected: %s", exc.code)
-            return _envelope(exc.status_code, exc.code, exc.detail)
+            return reject(exc.status_code, exc.code, exc.detail, exc.code, exc)
         except InvalidCallContextError as exc:
-            logger.warning("Public context rejected: %s", exc.reason.value)
-            return _envelope(
+            return reject(
                 503 if exc.reason is InvalidReason.JWKS_UNAVAILABLE else 401,
                 "callctx_invalid",
                 "public context verification failed",
+                exc.reason.value,
+                exc,
             )
         for method, pattern, permission in _PUBLIC_ROUTES:
             match = pattern.fullmatch(request.url.path) if request.method == method else None
@@ -228,15 +259,18 @@ class CallContextMiddleware(BaseHTTPMiddleware):
                 or verified.workspace_id != match["ws"]
                 or permission not in verified.permissions
             ):
-                return _envelope(
-                    403, "callctx_denied", "Gateway route permission and workspace scope required"
+                return reject(
+                    403,
+                    "callctx_denied",
+                    "Gateway route permission and workspace scope required",
+                    "scope_denied",
                 )
             request.state.call_context = CallContext(
                 workspace=verified.workspace_id,
                 principal=verified.acting_principal_id,
             )
             return None
-        return _envelope(403, "callctx_denied", "a public Workflow route is required")
+        return reject(403, "callctx_denied", "a public Workflow route is required", "route_denied")
 
 
 __all__ = [

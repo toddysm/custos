@@ -159,6 +159,39 @@ only bounded phase/status/source fields, never bearer/context tokens, request
 bodies or raw error messages; see the
 [failure-evidence procedure](workflow-resume-subscriptions.md#deterministic-registration-time-and-failure-evidence).
 
+#### Authentication failures before handler entry
+
+`WORKFLOW_PUBLIC_START_FAILURE` also covers public middleware rejections, before
+validation, durable acceptance or run-ID allocation. These records use
+`phase: authentication` for mesh/JWT/scope rejection or `phase: jwks` with
+`reason: jwks_unavailable` for unavailable verification keys. Correlation must be
+one canonical UUID header; absent, malformed or duplicate correlation is recorded
+as unavailable, never copied as arbitrary text.
+
+The fixed `reason`, allowlisted causal `errorType` and bounded source frames
+distinguish key-fetch HTTP, transport and decoding failures. `responseStatus`
+is the Workflow response (for example 503); `httpStatus`, when present, is the
+upstream JWKS HTTP status (for example 500). A pre-handler rejection has no run ID.
+No token, key ID, JWT claim, URL, payload or exception message is retained.
+The smoke failure collector matches these records to the public request even
+when the Workflow pod is Ready and no run was accepted; malformed records produce
+an explicit collection error. Public responses and retry behavior are unchanged.
+
+Readiness is **not** evidence that public authentication keys are available:
+the existing startup gate checks metadata and the workflow worker, while the
+public verifier fetches JWKS lazily. A first key-fetch failure can therefore
+return 503 while `/readyz` remains 200. This is now observable, not silently fixed.
+Do not add blind public POST retries or infer the cause of an earlier failure
+from a later successful request.
+
+Readiness-gating evaluation: prefer a separately designed, bounded initial
+JWKS warm-up for enforced public authentication over performing an Auth request
+on every readiness probe. It would need a public verifier/cache warm-up API,
+usable-key validation, a startup deadline and failure/recovery tests. It would
+also make Auth/sidecar reachability a startup dependency and would not prevent
+later cache-refresh failures. No gating or key-refresh policy change is enabled
+here, and health probes remain unauthenticated.
+
 The boundary with the Run Controller is sharp: the API Adapter
 **never** touches Dapr Workflow, the persistent run store, the
 metadata-store provider, or the step / activity wiring. It owns

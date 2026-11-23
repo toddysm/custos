@@ -8,13 +8,9 @@ are never execution-identity selection inputs.
 from __future__ import annotations
 
 import json
-import logging
-import re
-import traceback
 from collections.abc import Mapping
 from dataclasses import replace
 from datetime import timedelta
-from pathlib import Path
 from typing import Any, Literal
 
 from custos_callctx.execution import ExecutionBindings, ExecutionIdentity
@@ -27,10 +23,10 @@ from custos_spl.errors import (
 )
 from custos_spl.ids import WorkspaceId
 from custos_spl.interfaces.delivery import MAX_DELIVERY_RETENTION_SECONDS, WorkflowStart
-from grpc import Call as GrpcCall
 
+from custos_workflow._public_diagnostics import log_public_start_failure
 from custos_workflow.call_context import CallContext
-from custos_workflow.clients._errors import OutboundRpcError, OutboundRpcStatusError
+from custos_workflow.clients._errors import OutboundRpcError
 from custos_workflow.runs.controller import RunRef
 from custos_workflow.runs.errors import RunStateConflictError, WorkflowRuntimeUnavailableError
 from custos_workflow.runs.ids import derive_run_id
@@ -38,77 +34,6 @@ from custos_workflow.runs.orchestrator import RunInput
 from custos_workflow.runs.trigger_delivery import TriggerDeliveryController
 from custos_workflow.validator import StartRunValidator
 from custos_workflow.validator.errors import InputsSchemaError, WorkspaceUnauthorizedError
-
-logger = logging.getLogger(__name__)
-
-
-def log_public_start_failure(
-    run_id: str | None,
-    correlation_id: str | None,
-    phase: Literal[
-        "activation", "lookup", "identity", "retention", "recovery", "validate", "durable-start"
-    ],
-    error: Exception,
-) -> None:
-    """Retain a bounded start boundary and causal source, never exception/private text.
-
-    Unavailable request correlation and unknown exception classes are explicit.
-    Original exceptions and their public mapping remain owned by the caller.
-    """
-    correlation = (
-        correlation_id
-        if isinstance(correlation_id, str)
-        and re.fullmatch(
-            r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[89ab][0-9a-f]{3}-[0-9a-f]{12}",
-            correlation_id,
-        )
-        else None
-    )
-    root: BaseException = error
-    for _ in range(3):
-        if root.__cause__ is None:
-            break
-        root = root.__cause__
-    name = type(root).__name__
-    allowed_types = {
-        "WorkflowRuntimeUnavailableError",
-        "RunStateConflictError",
-        "ValueError",
-        "BackendUnavailable",
-        "LeaseBusy",
-        "LeaseExpired",
-        "MigrationRequired",
-        "OutboundRpcStatusError",
-        "OutboundRpcTransportError",
-        "OutboundRpcDecodeError",
-        "OSError",
-        "TimeoutError",
-        "LifecycleEventPublishError",
-        "_InactiveRpcError",
-    }
-    frames = [
-        {"file": Path(frame.filename).name, "function": frame.name, "line": frame.lineno}
-        for frame in traceback.extract_tb(root.__traceback__)[-5:]
-        if re.fullmatch(r"[A-Za-z0-9_-]{1,100}\.py", Path(frame.filename).name)
-        and re.fullmatch(r"[A-Za-z0-9_<>-]{1,100}", frame.name)
-    ]
-    status = root.status_code if isinstance(root, OutboundRpcStatusError) else None
-    grpc_status = root.code() if isinstance(root, GrpcCall) else None
-    logger.warning(
-        "WORKFLOW_PUBLIC_START_FAILURE %s",
-        json.dumps(
-            {
-                "correlationId": correlation,
-                "correlationUnavailable": correlation is None,
-                "runId": run_id,
-                "phase": phase,
-                "errorType": name if name in allowed_types else "unrecognized",
-                "httpStatus": status if type(status) is int and 100 <= status <= 599 else None,
-                "grpcStatus": None if grpc_status is None else grpc_status.name,
-                "frames": frames,
-            }
-        ),
-    )
 
 
 class PublicRunStarter:

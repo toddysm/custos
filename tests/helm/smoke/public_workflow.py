@@ -57,6 +57,19 @@ DIAGNOSTIC_ERROR_TYPES = frozenset(
         "TypeError",
         "AttributeError",
         "KeyError",
+        "InvalidCallContextError",
+        "MeshAuthenticationError",
+        "HTTPStatusError",
+        "ConnectError",
+        "ConnectTimeout",
+        "ReadError",
+        "ReadTimeout",
+        "WriteError",
+        "WriteTimeout",
+        "PoolTimeout",
+        "RemoteProtocolError",
+        "JSONDecodeError",
+        "UnicodeDecodeError",
         "unrecognized",
     }
 )
@@ -1079,7 +1092,11 @@ def diagnostic_source_frames(value: object) -> list[dict[str, Any]]:
 def dependency_failure_records(
     logs: str, correlations: set[str], source: str
 ) -> list[dict[str, Any]]:
-    """Keep only matched request-boundary records with fixed taxonomy and bounded source frames."""
+    """Keep matched failures with closed taxonomy and bounded source frames.
+
+    Pre-handler authentication failures require a fixed reason and explicit
+    response status, separate from upstream HTTP status; they have no run ID.
+    """
     prefix = (
         "GATEWAY_DEPENDENCY_FAILURE "
         if source == "api-gateway"
@@ -1102,6 +1119,8 @@ def dependency_failure_records(
                 "callctx-sign",
                 "request-key",
                 "dapr-route",
+                "authentication",
+                "jwks",
                 "activation",
                 "lookup",
                 "identity",
@@ -1161,6 +1180,38 @@ def dependency_failure_records(
             }
         ):
             raise ValueError("dependency diagnostic has invalid taxonomy or status")
+        authentication = row.get("phase") in {"authentication", "jwks"}
+        if authentication and (
+            source != "workflow-service"
+            or row.get("runId") is not None
+            or row.get("reason")
+            not in {
+                "verifier_unavailable",
+                "mesh_unavailable",
+                "mesh_unauthenticated",
+                "mesh_caller_denied",
+                "missing_header",
+                "duplicate_header",
+                "malformed_token",
+                "missing_kid",
+                "unknown_kid",
+                "bad_algorithm",
+                "bad_signature",
+                "expired",
+                "not_yet_valid",
+                "wrong_audience",
+                "wrong_issuer",
+                "missing_claim",
+                "jwks_unavailable",
+                "scope_denied",
+                "route_denied",
+                "unrecognized",
+            }
+            or type(row.get("responseStatus")) is not int
+            or row["responseStatus"] not in {401, 403, 503}
+            or (row["phase"] == "jwks") != (row.get("reason") == "jwks_unavailable")
+        ):
+            raise ValueError("authentication diagnostic has invalid reason or status")
         safe_frames = diagnostic_source_frames(row.get("frames", []))
         records.append(
             {
@@ -1179,6 +1230,14 @@ def dependency_failure_records(
                         "grpcStatus",
                     )
                 },
+                **(
+                    {
+                        "reason": row["reason"],
+                        "responseStatus": row["responseStatus"],
+                    }
+                    if authentication
+                    else {}
+                ),
                 "frames": safe_frames,
             }
         )
