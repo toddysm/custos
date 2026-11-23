@@ -693,13 +693,28 @@ def test_readiness_byte_capped_logs_preserve_complete_component_records(
         # Multibyte filler checks the byte cap rather than a character-count proxy.
         logs = "\u00e9" * (padding_bytes // 2) + "x" * (padding_bytes % 2) + "\n" + logs
         assert len(logs.encode()) == 32768
+    log_file = tmp_path / "arm-log.bin"
+    payload = logs.encode()
+    if limit_reached and partial:
+        payload = payload[:-1] + "\u00e9".encode() + b"syntheticPrivateTail"
+        assert payload[32767:32769] == b"\xc3\xa9"
+    log_file.write_bytes(payload)
+    original_run = subprocess.run
 
     def run(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
-        """Return one primary probe failure and the same bounded current/previous log sample."""
+        """Decode real child bytes with the collector's options, including a split UTF-8 character."""
         if "exec" in args:
             return subprocess.CompletedProcess(args, 1, "", "syntheticPrivate")
         assert "--tail=200" in args and "--limit-bytes=32768" in args
-        return subprocess.CompletedProcess(args, 0, logs)
+        return original_run(
+            [
+                sys.executable,
+                "-c",
+                "import pathlib,sys; sys.stdout.buffer.write(pathlib.Path(sys.argv[1]).read_bytes()[:32768])",
+                str(log_file),
+            ],
+            **kwargs,
+        )
 
     monkeypatch.setattr(subprocess, "run", run)
     with pytest.raises(RuntimeError):

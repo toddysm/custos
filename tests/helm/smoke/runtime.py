@@ -23,7 +23,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 
@@ -44,13 +44,24 @@ READINESS_PREFIX = "RUNTIME_READINESS_PROBE "
 ARM_LOG_BYTE_LIMIT = 32768
 
 
-def command(args: list[str], payload: object = None, *, timeout: int = 360) -> str:
-    """Capture private command output; surface failures without echoing Secret-bearing streams."""
+def command(
+    args: list[str],
+    payload: object = None,
+    *,
+    timeout: int = 360,
+    errors: Literal["strict", "replace"] = "strict",
+) -> str:
+    """Capture private output; surface failures without echoing Secret-bearing streams.
+
+    Only log collection opts into replacement decoding for byte-cut UTF-8;
+    all other command consumers retain strict decoding.
+    """
     result = subprocess.run(
         args,
         input=None if payload is None else json.dumps(payload),
         capture_output=True,
         text=True,
+        errors=errors,
         timeout=timeout,
         check=False,
     )
@@ -741,6 +752,7 @@ def collect_readiness_failure(output: Path, report: dict[str, Any]) -> None:
                     *extra,
                 ],
                 timeout=20,
+                errors="replace",
             )
             byte_limit_reached = len(logs.encode("utf-8")) >= ARM_LOG_BYTE_LIMIT
             if byte_limit_reached and not logs.endswith("\n"):

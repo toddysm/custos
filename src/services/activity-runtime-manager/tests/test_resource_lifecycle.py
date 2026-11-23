@@ -11,9 +11,11 @@ from collections.abc import AsyncIterator
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
+from unittest.mock import Mock
 
 import httpx
 import pytest
+from asyncpg import InterfaceError, PostgresError  # type: ignore[import-untyped]
 from custos_csi.adapters import CsiArtifactAdapter
 from custos_pg import PgMetadataAdapter
 from custos_pg.adapters.lease import PgLeaseAdapter
@@ -54,13 +56,15 @@ async def test_cancelled_kubernetes_probe_joins_its_owned_call() -> None:
         await asyncio.wait_for(probe, 1)
 
 
-@pytest.mark.parametrize("kind", ["http", "kubernetes", "unknown"])
+@pytest.mark.parametrize(
+    "kind", ["http", "kubernetes", "unknown", "postgres", "postgres-interface"]
+)
 async def test_component_record_preserves_exception_and_passes_real_collector(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
     kind: str,
 ) -> None:
-    """Keep HTTP/Kubernetes numeric status, not private messages, through the real collector."""
+    """Keep statuses and raw lease-driver failures, not private messages, through the collector."""
     root = Path(__file__).resolve().parents[4]
     monkeypatch.syspath_prepend(str(root / "tests/helm/smoke"))
     collector = runpy.run_path(str(root / "tests/helm/smoke/runtime.py"))
@@ -77,6 +81,12 @@ async def test_component_record_preserves_exception_and_passes_real_collector(
         )
     elif kind == "kubernetes":
         error = ApiException(status=403, reason="syntheticPrivateReason")
+    elif kind in {"postgres", "postgres-interface"}:
+        error = (
+            PostgresError("syntheticPrivateMessage")
+            if kind == "postgres"
+            else InterfaceError("syntheticPrivateMessage")
+        )
     else:
         error = PrivateFailure("syntheticPrivateMessage")
 
@@ -84,18 +94,22 @@ async def test_component_record_preserves_exception_and_passes_real_collector(
         """Raise the same exception object so diagnostic instrumentation cannot replace it."""
         raise error
 
+    pool = Mock()
+    pool.acquire.side_effect = error
     with readiness_cycle("startup"), pytest.raises(type(error)) as raised:
-        await probe_component("metadata", fail())
+        await probe_component(
+            "lease-schema",
+            PgLeaseAdapter(pool=pool).refresh_declared()
+            if kind in {"postgres", "postgres-interface"}
+            else fail(),
+        )
     assert raised.value is error
     records = collector["component_failure_records"](caplog.text)
     assert len(records) == 1
-    assert records[0]["component"] == "metadata"
-    assert records[0]["httpStatus"] == {"http": 502, "kubernetes": 403, "unknown": None}[kind]
-    assert (
-        records[0]["errorType"]
-        == {"http": "HTTPStatusError", "kubernetes": "ApiException", "unknown": "unrecognized"}[
-            kind
-        ]
+    assert records[0]["component"] == "lease-schema"
+    assert records[0]["httpStatus"] == {"http": 502, "kubernetes": 403}.get(kind)
+    assert records[0]["errorType"] == {"http": "HTTPStatusError", "kubernetes": "ApiException"}.get(
+        kind, "unrecognized"
     )
     assert records[0]["frames"] and len(records[0]["frames"]) <= 5
     assert "syntheticPrivate" not in json.dumps(records)

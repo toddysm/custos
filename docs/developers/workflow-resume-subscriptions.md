@@ -152,7 +152,9 @@ For a failed deployed proof:
    identify a failed component. Collection requests each stream's last 200 lines,
    capped at the **first** 32 KiB of that tail. `logByteLimitReached` marks a
    sample that may omit the newest lines; an unterminated final line at the cap
-   is discarded so it cannot invalidate earlier complete records.
+   is discarded so it cannot invalidate earlier complete records. Log-only
+   replacement decoding tolerates a cap inside a UTF-8 character; other
+   command consumers still decode strictly.
    The last 50 component records **within that sample** are retained.
    `componentFailuresTruncated` marks either the byte cap or the 50-record cap;
    it does not claim that the newest records in the original stream survived.

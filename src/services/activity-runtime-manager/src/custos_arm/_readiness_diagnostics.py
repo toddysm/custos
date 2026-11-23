@@ -19,6 +19,7 @@ from typing import Literal, TypeVar
 from uuid import uuid4
 
 import httpx
+from asyncpg import InterfaceError, PostgresError  # type: ignore[import-untyped]
 from custos_callctx.execution_client import ExecutionAuthorizationError
 from custos_spl.errors import SPLError
 from kubernetes.client.exceptions import ApiException
@@ -147,13 +148,14 @@ def log_readiness_failure(
 
 
 async def probe_component(component: Component, operation: Awaitable[_T]) -> _T:
-    """Log known dependency failures and re-raise unchanged; cancellation is not a failure.
+    """Log dependency/driver failures and re-raise unchanged; cancellation is not a failure.
 
     The caller owns deadlines. Sibling cancellation cannot masquerade as a
     component failure, and blocking Kubernetes work still joins before cleanup.
+    Raw PostgreSQL errors are logged here without widening the group-conversion set.
     """
     try:
         return await operation
-    except PROBE_ERRORS as error:
+    except (*PROBE_ERRORS, PostgresError, InterfaceError) as error:
         log_readiness_failure(component, "error", error)
         raise
