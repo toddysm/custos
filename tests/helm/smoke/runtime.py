@@ -41,6 +41,7 @@ WORKSPACE = "workspace-default"
 PRINCIPAL = "smoke-executor"
 EXECUTION_SECRET = "smoke-execution"
 READINESS_PREFIX = "RUNTIME_READINESS_PROBE "
+ARM_LOG_BYTE_LIMIT = 32768
 
 
 def command(args: list[str], payload: object = None, *, timeout: int = 360) -> str:
@@ -604,7 +605,7 @@ def readiness_probe_record(text: str) -> dict[str, Any]:
 
 
 def component_failure_records(logs: str) -> list[dict[str, Any]]:
-    """Keep the latest 50 closed ARM component records, never arbitrary log/extra fields.
+    """Keep the last 50 closed ARM records in the supplied sample, never arbitrary log fields.
 
     Probe IDs group failures within one startup or readiness cycle; separate
     log streams remain separate observations, not proof of the active HTTP cause.
@@ -736,17 +737,25 @@ def collect_readiness_failure(output: Path, report: dict[str, Any]) -> None:
                     "-c",
                     "activity-runtime-manager",
                     "--tail=200",
-                    "--limit-bytes=32768",
+                    f"--limit-bytes={ARM_LOG_BYTE_LIMIT}",
                     *extra,
                 ],
                 timeout=20,
             )
-            report["serviceLogs"][source] = failure_locations(logs)
+            byte_limit_reached = len(logs.encode("utf-8")) >= ARM_LOG_BYTE_LIMIT
+            if byte_limit_reached and not logs.endswith("\n"):
+                # kubectl limits the beginning of the tail, possibly cutting its final record.
+                logs = logs.rpartition("\n")[0]
+            report["serviceLogs"][source] = failure_locations(logs) | {
+                "logByteLimitReached": byte_limit_reached
+            }
             report["serviceLogs"][source]["componentFailures"] = (
                 component_failure_records(logs)
             )
             report["serviceLogs"][source]["componentFailuresTruncated"] = (
-                sum("ARM_READINESS_FAILURE " in line for line in logs.splitlines()) > 50
+                byte_limit_reached
+                or sum("ARM_READINESS_FAILURE " in line for line in logs.splitlines())
+                > 50
             )
         except (OSError, RuntimeError, ValueError, subprocess.TimeoutExpired) as error:
             report["collectionErrors"].append(

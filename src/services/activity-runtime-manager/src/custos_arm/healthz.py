@@ -45,7 +45,7 @@ async def readyz(request: Request) -> JSONResponse:
 
 
 async def _readiness_response(request: Request) -> JSONResponse:
-    """Require the existing gate/scheduler/dependencies, sharing cycle identity with probes."""
+    """Share cycle identity with probes; log local timeouts, not already-diagnosed group errors."""
     if getattr(request.app.state, "ready", False):
         if isinstance(getattr(request.app.state, "scheduler", None), ActivityScheduler):
             probe = getattr(request.app.state, "readiness_probe", None)
@@ -55,7 +55,8 @@ async def _readiness_response(request: Request) -> JSONResponse:
                 except (TimeoutError, RuntimeError, SPLError, httpx.HTTPError) as error:
                     request.app.state.dependencies_ready = False
                     logger.warning("Activity runtime dependency readiness failed")
-                    log_readiness_failure("dependencies", "error", error)
+                    if isinstance(error, TimeoutError):
+                        log_readiness_failure("dependencies", "error", error)
                     return JSONResponse(
                         {"status": "not_ready", "detail": "runtime dependency unavailable"},
                         status_code=503,

@@ -149,9 +149,15 @@ For a failed deployed proof:
    Cycles are independent, and previous-instance records are historical;
    neither source-only locations nor an unrelated cycle proves the active
    HTTP request's cause. A group deadline without a member failure does not
-   identify a failed component. Collection retains the latest 50 records per stream,
-   with an explicit `componentFailuresTruncated` flag. Invalid or oversized
-   retained records fail collection explicitly. No private error
+   identify a failed component. Collection requests each stream's last 200 lines,
+   capped at the **first** 32 KiB of that tail. `logByteLimitReached` marks a
+   sample that may omit the newest lines; an unterminated final line at the cap
+   is discarded so it cannot invalidate earlier complete records.
+   The last 50 component records **within that sample** are retained.
+   `componentFailuresTruncated` marks either the byte cap or the 50-record cap;
+   it does not claim that the newest records in the original stream survived.
+   Other invalid or oversized retained records still fail collection explicitly.
+   No private error
    text, resource names, endpoints, payloads or credentials are retained.
    Missing previous logs and other collection errors remain explicit in
    `collectionErrors`; diagnostic-only output is never readiness success.

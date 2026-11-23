@@ -328,6 +328,9 @@ async def test_production_resource_graph_and_failure_cleanup(
                     }[dependency]
                     assert expected in {row["component"] for row in records}
                     assert len({row["probeId"] for row in records}) == 1
+                    assert [
+                        row["reason"] for row in records if row["component"] == "dependencies"
+                    ] == ["group_failed"]
                     if dependency == "http":
                         assert any(
                             row["component"] == "connector" and row["httpStatus"] == 503

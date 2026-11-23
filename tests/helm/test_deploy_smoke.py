@@ -654,6 +654,75 @@ def test_ready_arm_component_evidence_is_bounded_and_collection_errors_are_expli
         )
 
 
+@pytest.mark.parametrize(
+    ("limit_reached", "partial"),
+    [(True, True), (True, False), (False, True)],
+)
+def test_readiness_byte_capped_logs_preserve_complete_component_records(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    limit_reached: bool,
+    partial: bool,
+) -> None:
+    """Keep complete records before a byte-cut final line, but do not excuse uncapped invalid JSON."""
+    monkeypatch.setenv("NS", "custos-system")
+    monkeypatch.setenv("GITHUB_SHA", TAG)
+    record = {
+        "probeId": "a" * 32,
+        "phase": "readiness",
+        "component": "artifacts",
+        "reason": "error",
+        "errorType": "BackendUnavailable",
+        "httpStatus": None,
+        "frames": [],
+    }
+    lines = [
+        "WARNING ARM_READINESS_FAILURE "
+        + json.dumps({**record, "probeId": f"{index:032x}"})
+        + "\n"
+        for index in range(4)
+    ]
+    logs = "".join(lines[:3]) + (
+        'WARNING ARM_READINESS_FAILURE {"probeId": "syntheticPrivateTail'
+        if partial
+        else lines[3]
+    )
+    if limit_reached:
+        padding_bytes = 32768 - len(logs.encode()) - 1
+        # Multibyte filler checks the byte cap rather than a character-count proxy.
+        logs = "\u00e9" * (padding_bytes // 2) + "x" * (padding_bytes % 2) + "\n" + logs
+        assert len(logs.encode()) == 32768
+
+    def run(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        """Return one primary probe failure and the same bounded current/previous log sample."""
+        if "exec" in args:
+            return subprocess.CompletedProcess(args, 1, "", "syntheticPrivate")
+        assert "--tail=200" in args and "--limit-bytes=32768" in args
+        return subprocess.CompletedProcess(args, 0, logs)
+
+    monkeypatch.setattr(subprocess, "run", run)
+    with pytest.raises(RuntimeError):
+        smoke.verify(tmp_path / "runtime-evidence.json")
+    text = (tmp_path / "runtime-readiness-diagnostics.json").read_text()
+    report = json.loads(text)
+    assert report["failure"] == {"category": "exec_exit"}
+    assert "syntheticPrivate" not in text + capsys.readouterr().out
+    if not limit_reached:
+        assert report["collectionErrors"] == [
+            {"source": source, "errorType": "ValueError"}
+            for source in ("arm-current", "arm-previous")
+        ]
+    else:
+        assert report["collectionErrors"] == []
+        for evidence in report["serviceLogs"].values():
+            assert evidence["logByteLimitReached"] is True
+            assert evidence["componentFailuresTruncated"] is True
+            assert [row["probeId"] for row in evidence["componentFailures"]] == [
+                f"{index:032x}" for index in range(3 if partial else 4)
+            ]
+
+
 def test_preseed_grants_only_workspace_execution_and_closes_pool(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
