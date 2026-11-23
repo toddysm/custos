@@ -28,6 +28,12 @@ SIDECAR = "localhost:5001/smoke-sidecar@sha256:" + "b" * 64
 HELPER = "localhost:5001/smoke-hook-helper@sha256:" + "c" * 64
 
 
+@pytest.fixture(autouse=True)
+def smoke_cli_import_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Give runpy-loaded scripts the sibling imports supplied by normal CLI execution."""
+    monkeypatch.syspath_prepend(str(ROOT / "tests/helm/smoke"))
+
+
 def managed_render(*, public_execution: bool = False) -> list[dict[str, Any]]:
     """Render the actual profile with the exact overlay used by hosted smoke setup."""
     overlay = smoke.settings(TAG, "custos-system", ["10.96.0.1"], SIDECAR, HELPER)
@@ -563,6 +569,89 @@ def test_readiness_artifact_write_failure_preserves_the_original_probe_error(
         "errorType": "OSError",
     }
     assert "syntheticPrivate" not in text
+
+
+@pytest.mark.parametrize(
+    ("invalid", "count"),
+    [
+        (None, 1),
+        (None, 51),
+        ({"component": ["syntheticPrivate"]}, 1),
+        ({"httpStatus": True}, 1),
+        (
+            {
+                "frames": [
+                    {"file": "/private/source.py", "function": "probe", "line": 1}
+                ]
+            },
+            1,
+        ),
+        ({"message": "syntheticPrivate" * 400}, 1),
+    ],
+)
+def test_ready_arm_component_evidence_is_bounded_and_collection_errors_are_explicit(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    invalid: dict[str, Any] | None,
+    count: int,
+) -> None:
+    """Collect components from both Ready-ARM streams, excluding private fields and bad records."""
+    monkeypatch.setenv("NS", "custos-system")
+    monkeypatch.setenv("GITHUB_SHA", TAG)
+    record = {
+        "probeId": "a" * 32,
+        "phase": "readiness",
+        "component": "artifacts",
+        "reason": "error",
+        "errorType": "BackendUnavailable",
+        "httpStatus": None,
+        "frames": [
+            {"file": "resources.py", "function": "probe_artifacts", "line": 125}
+        ],
+        "message": "syntheticPrivateMessage",
+        "url": "https://private/?token=syntheticPrivate",
+    }
+
+    def run(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        """Return primary exec failure, then bounded current/previous structured logs."""
+        if "exec" in args:
+            return subprocess.CompletedProcess(args, 1, "", "syntheticPrivate")
+        row = {**record, "phase": "startup"} if "--previous" in args else record
+        if invalid is not None:
+            row = {**row, **invalid}
+        logs = "\n".join(
+            "WARNING ARM_READINESS_FAILURE "
+            + json.dumps(row if count == 1 else {**row, "probeId": f"{index:032x}"})
+            for index in range(count)
+        )
+        return subprocess.CompletedProcess(args, 0, logs)
+
+    monkeypatch.setattr(subprocess, "run", run)
+    with pytest.raises(RuntimeError):
+        smoke.verify(tmp_path / "runtime-evidence.json")
+    text = (tmp_path / "runtime-readiness-diagnostics.json").read_text()
+    report = json.loads(text)
+    assert report["failure"] == {"category": "exec_exit"}
+    assert "syntheticPrivate" not in text and "https://" not in text
+    if invalid is not None:
+        assert [row["source"] for row in report["collectionErrors"]] == [
+            "arm-current",
+            "arm-previous",
+        ]
+    else:
+        assert report["collectionErrors"] == []
+        evidence = report["serviceLogs"]["arm-current"]
+        rows = evidence["componentFailures"]
+        assert len(rows) == min(count, 50)
+        assert evidence["componentFailuresTruncated"] is (count > 50)
+        current = rows[0]
+        previous = report["serviceLogs"]["arm-previous"]["componentFailures"][0]
+        assert current["component"] == "artifacts" and current["phase"] == "readiness"
+        assert previous["phase"] == "startup"
+        assert current["frames"] == record["frames"]
+        assert current["probeId"] == (
+            record["probeId"] if count == 1 else f"{count - 50:032x}"
+        )
 
 
 def test_preseed_grants_only_workspace_execution_and_closes_pool(

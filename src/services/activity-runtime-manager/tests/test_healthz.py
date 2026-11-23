@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 
 import pytest
@@ -69,7 +70,7 @@ def test_configured_scheduler_opens_readiness_only_during_lifespan() -> None:
     assert app.state.ready_detail == "activity-runtime-manager is shutting down"
 
 
-def test_ready_flag_cannot_hide_a_lost_scheduler() -> None:
+def test_ready_flag_cannot_hide_a_lost_scheduler(caplog: pytest.LogCaptureFixture) -> None:
     """Readiness also checks the actual dispatcher rather than trusting a stale boolean."""
     app = create_app()
     app.state.scheduler = _RecordingScheduler(result=_success_envelope())
@@ -79,21 +80,66 @@ def test_ready_flag_cannot_hide_a_lost_scheduler() -> None:
         response = client.get("/readyz")
     assert response.status_code == 503
     assert response.json()["detail"] == "activity scheduler is not configured"
+    records = [
+        json.loads(row.getMessage().split("ARM_READINESS_FAILURE ", 1)[1])
+        for row in caplog.records
+        if "ARM_READINESS_FAILURE " in row.getMessage()
+    ]
+    assert records[-1]["component"] == "scheduler"
+    assert records[-1]["reason"] == "scheduler_missing"
+    assert records[-1]["phase"] == "readiness"
 
 
-def test_readyz_is_503_before_lifespan_flips_ready() -> None:
-    """When the lifespan has not run, ``/readyz`` reports 503 with detail."""
+def test_readyz_is_503_before_lifespan_flips_ready(caplog: pytest.LogCaptureFixture) -> None:
+    """Keep the original detail in the 503 response, but only a closed gate reason in logs."""
     app = create_app()
     app.state.ready = False
-    app.state.ready_detail = "resolver warm-up pending"
+    app.state.ready_detail = "syntheticPrivateStatus"
     # Use TestClient WITHOUT the ``with`` block so the lifespan does not run.
     client = TestClient(app)
     response = client.get("/readyz")
     assert response.status_code == 503
     assert response.json() == {
         "status": "not_ready",
-        "detail": "resolver warm-up pending",
+        "detail": "syntheticPrivateStatus",
     }
+    assert "syntheticPrivateStatus" not in caplog.text
+    records = [
+        json.loads(row.getMessage().split("ARM_READINESS_FAILURE ", 1)[1])
+        for row in caplog.records
+        if "ARM_READINESS_FAILURE " in row.getMessage()
+    ]
+    assert records[-1]["component"] == "lifecycle"
+    assert records[-1]["reason"] == "gate_closed"
+
+
+def test_readiness_timeout_is_diagnosed_without_retry(caplog: pytest.LogCaptureFixture) -> None:
+    """Timeout still rejects one probe with the original 503 contract, never private text."""
+    app = create_app()
+    app.state.scheduler = _RecordingScheduler(result=_success_envelope())
+    calls = 0
+
+    async def timeout() -> None:
+        """Model the existing dependency deadline without a real elapsed-time wait."""
+        nonlocal calls
+        calls += 1
+        raise TimeoutError("syntheticPrivate")
+
+    with TestClient(app) as client:
+        app.state.readiness_probe = timeout
+        response = client.get("/readyz")
+    assert calls == 1
+    assert response.status_code == 503
+    assert response.json() == {"status": "not_ready", "detail": "runtime dependency unavailable"}
+    assert app.state.dependencies_ready is False
+    assert "syntheticPrivate" not in caplog.text
+    records = [
+        json.loads(row.getMessage().split("ARM_READINESS_FAILURE ", 1)[1])
+        for row in caplog.records
+        if "ARM_READINESS_FAILURE " in row.getMessage()
+    ]
+    assert records[-1]["errorType"] == "TimeoutError"
+    assert records[-1]["component"] == "dependencies"
 
 
 def test_readyz_503_uses_default_detail_when_unset() -> None:

@@ -134,8 +134,25 @@ For a failed deployed proof:
    environment values, URLs or exception messages. It does not retry readiness
    or the public POST.
    Current and previous ARM logs are collected even when Kubernetes reports
-   the Pod Ready, but retain only bounded filename/function/line locations.
-   These uncorrelated locations do not prove which dependency failed.
+   the Pod Ready; raw log lines are not retained.
+   `serviceLogs` also retains validated `ARM_READINESS_FAILURE` records as
+   `componentFailures`: a closed component/reason/type, numeric upstream status,
+   at most five source frames, `startup`/`readiness` phase and an opaque probe-cycle ID.
+   Components cover metadata/schema checks, artifacts, execution authorization,
+   Catalog/Connector readiness and Kubernetes Job/Pod reads. Readiness rejections
+   distinguish a closed lifecycle gate, missing scheduler and failed dependency
+   cycle. Member failures are logged **before** concurrent errors are grouped;
+   sibling cancellation alone is not a component failure.
+   Secret resolution and Auth exchange share the `execution-authorization`
+   boundary: the existing client deliberately sanitizes their errors, so this
+   label does not distinguish those two operations or recover hidden status.
+   Cycles are independent, and previous-instance records are historical;
+   neither source-only locations nor an unrelated cycle proves the active
+   HTTP request's cause. A group deadline without a member failure does not
+   identify a failed component. Collection retains the latest 50 records per stream,
+   with an explicit `componentFailuresTruncated` flag. Invalid or oversized
+   retained records fail collection explicitly. No private error
+   text, resource names, endpoints, payloads or credentials are retained.
    Missing previous logs and other collection errors remain explicit in
    `collectionErrors`; diagnostic-only output is never readiness success.
    If artifact writing fails, the same sanitized report remains in the runner

@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import os
+import runpy
 import threading
 import time
 from collections.abc import AsyncIterator
@@ -22,8 +23,10 @@ from custos_spl.ids import WorkspaceId
 from custos_spl.interfaces.artifact_store import ArtifactDescriptor
 from kubernetes import client as kube_client
 from kubernetes import config as kube_config
+from kubernetes.client.exceptions import ApiException
 
 from custos_arm import create_app
+from custos_arm._readiness_diagnostics import probe_component, readiness_cycle
 from custos_arm.config import Settings
 from custos_arm.credential_proxy import CredentialProxy
 from custos_arm.resources import _blocking_probe, open_runtime
@@ -51,6 +54,82 @@ async def test_cancelled_kubernetes_probe_joins_its_owned_call() -> None:
         await asyncio.wait_for(probe, 1)
 
 
+@pytest.mark.parametrize("kind", ["http", "kubernetes", "unknown"])
+async def test_component_record_preserves_exception_and_passes_real_collector(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    kind: str,
+) -> None:
+    """Keep HTTP/Kubernetes numeric status, not private messages, through the real collector."""
+    root = Path(__file__).resolve().parents[4]
+    monkeypatch.syspath_prepend(str(root / "tests/helm/smoke"))
+    collector = runpy.run_path(str(root / "tests/helm/smoke/runtime.py"))
+
+    class PrivateFailure(RuntimeError):
+        """Supply a deliberately unknown type that must not enter retained evidence."""
+
+    error: Exception
+    if kind == "http":
+        error = httpx.HTTPStatusError(
+            "syntheticPrivateMessage",
+            request=httpx.Request("GET", "https://private/?token=syntheticPrivate"),
+            response=httpx.Response(502),
+        )
+    elif kind == "kubernetes":
+        error = ApiException(status=403, reason="syntheticPrivateReason")
+    else:
+        error = PrivateFailure("syntheticPrivateMessage")
+
+    async def fail() -> None:
+        """Raise the same exception object so diagnostic instrumentation cannot replace it."""
+        raise error
+
+    with readiness_cycle("startup"), pytest.raises(type(error)) as raised:
+        await probe_component("metadata", fail())
+    assert raised.value is error
+    records = collector["component_failure_records"](caplog.text)
+    assert len(records) == 1
+    assert records[0]["component"] == "metadata"
+    assert records[0]["httpStatus"] == {"http": 502, "kubernetes": 403, "unknown": None}[kind]
+    assert (
+        records[0]["errorType"]
+        == {"http": "HTTPStatusError", "kubernetes": "ApiException", "unknown": "unrecognized"}[
+            kind
+        ]
+    )
+    assert records[0]["frames"] and len(records[0]["frames"]) <= 5
+    assert "syntheticPrivate" not in json.dumps(records)
+    assert "PrivateFailure" not in json.dumps(records)
+    assert str(root) not in json.dumps(records)
+
+
+async def test_component_cancellation_is_not_logged_and_cycle_context_resets(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Sibling cancellation stays cancellation; independent cycles cannot inherit old phase/ID."""
+
+    async def cancel() -> None:
+        """Model task-group sibling cancellation without inventing a dependency failure."""
+        raise asyncio.CancelledError
+
+    with readiness_cycle("startup"), pytest.raises(asyncio.CancelledError):
+        await probe_component("artifacts", cancel())
+    assert not caplog.records
+
+    async def fail() -> None:
+        """Supply a safe failure in two independent cycles."""
+        raise RuntimeError("syntheticPrivate")
+
+    for phase in ("startup", "readiness"):
+        with readiness_cycle(phase), pytest.raises(RuntimeError):
+            await probe_component("artifacts", fail())
+    records = [
+        json.loads(row.getMessage().split("ARM_READINESS_FAILURE ", 1)[1]) for row in caplog.records
+    ]
+    assert [row["phase"] for row in records] == ["startup", "readiness"]
+    assert records[0]["probeId"] != records[1]["probeId"]
+
+
 @pytest.mark.parametrize(
     "failure", [None, "schema", "snapshot", "http", "kubernetes", "csi", "secret", "auth"]
 )
@@ -61,6 +140,7 @@ async def test_production_resource_graph_and_failure_cleanup(
     monkeypatch: pytest.MonkeyPatch,
     failure: str | None,
     file_source: bool,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Keep actual adapters and clients; emulate only external readiness I/O."""
     events: list[str] = []
@@ -193,11 +273,37 @@ async def test_production_resource_graph_and_failure_cleanup(
     monkeypatch.setattr(kube_client.CoreV1Api, "list_namespaced_pod", list_objects)
     monkeypatch.setattr(kube_client.ApiClient, "close", close_api)
     app = create_app(selected, resource_factory=open_runtime)
+
+    def component_records(phase: str) -> list[dict[str, Any]]:
+        """Read only structured component evidence, not private or generic application logs."""
+        records = [
+            json.loads(row.getMessage().split("ARM_READINESS_FAILURE ", 1)[1])
+            for row in caplog.records
+            if "ARM_READINESS_FAILURE " in row.getMessage()
+        ]
+        assert records
+        assert all(record["phase"] == phase for record in records)
+        assert all(len(record["probeId"]) == 32 for record in records)
+        text = json.dumps(records)
+        assert "private-probe-credential" not in text and "e30.probe.signature" not in text
+        assert "http://" not in text and str(tmp_path) not in text
+        return records
+
     if failure:
         with pytest.raises(RuntimeError):
             async with app.router.lifespan_context(app):
                 pytest.fail("faulted resource graph opened admission")
         assert not app.state.ready
+        expected = {
+            "schema": "metadata-schema",
+            "snapshot": "metadata",
+            "http": "connector",
+            "kubernetes": "kubernetes-jobs",
+            "csi": "artifacts",
+            "secret": "execution-authorization",
+            "auth": "execution-authorization",
+        }[failure]
+        assert expected in {row["component"] for row in component_records("startup")}
     else:
         async with app.router.lifespan_context(app):
             assert isinstance(app.state.scheduler, ActivityScheduler)
@@ -209,8 +315,24 @@ async def test_production_resource_graph_and_failure_cleanup(
                 assert (await caller.get("/healthz")).status_code == 200
                 assert "auth" in events and "secret" in events
                 for dependency in ("http", "kubernetes", "csi", "secret", "auth"):
+                    caplog.clear()
                     unhealthy.add(dependency)
                     assert (await caller.get("/readyz")).status_code == 503
+                    records = component_records("readiness")
+                    expected = {
+                        "http": "connector",
+                        "kubernetes": "kubernetes-jobs",
+                        "csi": "artifacts",
+                        "secret": "execution-authorization",
+                        "auth": "execution-authorization",
+                    }[dependency]
+                    assert expected in {row["component"] for row in records}
+                    assert len({row["probeId"] for row in records}) == 1
+                    if dependency == "http":
+                        assert any(
+                            row["component"] == "connector" and row["httpStatus"] == 503
+                            for row in records
+                        )
                     assert not app.state.dependencies_ready
                     assert (await caller.get("/healthz")).status_code == 200
                     unhealthy.clear()

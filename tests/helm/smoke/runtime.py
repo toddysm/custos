@@ -603,10 +603,122 @@ def readiness_probe_record(text: str) -> dict[str, Any]:
     } | {"frames": diagnostic_source_frames(row.get("frames", []))}
 
 
+def component_failure_records(logs: str) -> list[dict[str, Any]]:
+    """Keep the latest 50 closed ARM component records, never arbitrary log/extra fields.
+
+    Probe IDs group failures within one startup or readiness cycle; separate
+    log streams remain separate observations, not proof of the active HTTP cause.
+    The collector separately records truncation; malformed retained records raise.
+    """
+    from public_workflow import diagnostic_source_frames
+
+    records: list[dict[str, Any]] = []
+    prefix = "ARM_READINESS_FAILURE "
+    for line in reversed(logs.splitlines()):
+        if prefix not in line:
+            continue
+        if len(records) >= 50:
+            break
+        text = line.split(prefix, 1)[1]
+        if len(text) > 4096:
+            raise ValueError("ARM component evidence exceeds its bound")
+        row = json.loads(text)
+        if (
+            not isinstance(row, dict)
+            or not isinstance(row.get("probeId"), str)
+            or re.fullmatch(r"[a-f0-9]{32}", row["probeId"]) is None
+            or not isinstance(row.get("phase"), str)
+            or row["phase"] not in {"startup", "readiness"}
+            or not isinstance(row.get("component"), str)
+            or row["component"]
+            not in {
+                "metadata-schema",
+                "execution-schema",
+                "lease-schema",
+                "metadata",
+                "artifacts",
+                "execution-authorization",
+                "catalog",
+                "connector",
+                "kubernetes-jobs",
+                "kubernetes-pods",
+                "dependencies",
+                "scheduler",
+                "lifecycle",
+            }
+            or not isinstance(row.get("reason"), str)
+            or row["reason"]
+            not in {
+                "error",
+                "http_status",
+                "group_failed",
+                "scheduler_missing",
+                "gate_closed",
+                "unavailable",
+                "denied",
+            }
+            or (
+                row.get("errorType") is not None
+                and not isinstance(row["errorType"], str)
+            )
+            or row.get("errorType")
+            not in {
+                None,
+                "RuntimeError",
+                "ExceptionGroup",
+                "TimeoutError",
+                "OSError",
+                "PermissionError",
+                "FileNotFoundError",
+                "BackendUnavailable",
+                "MigrationRequired",
+                "ExecutionAuthorizationError",
+                "HTTPStatusError",
+                "ConnectError",
+                "ConnectTimeout",
+                "ReadError",
+                "ReadTimeout",
+                "WriteError",
+                "WriteTimeout",
+                "PoolTimeout",
+                "RemoteProtocolError",
+                "ApiException",
+                "MaxRetryError",
+                "ProtocolError",
+                "SSLError",
+                "unrecognized",
+            }
+            or (
+                row.get("httpStatus") is not None
+                and (
+                    type(row["httpStatus"]) is not int
+                    or not 100 <= row["httpStatus"] <= 599
+                )
+            )
+        ):
+            raise ValueError("ARM component evidence has invalid identity or taxonomy")
+        records.append(
+            {
+                key: row.get(key)
+                for key in (
+                    "probeId",
+                    "phase",
+                    "component",
+                    "reason",
+                    "errorType",
+                    "httpStatus",
+                )
+            }
+            | {"frames": diagnostic_source_frames(row.get("frames", []))}
+        )
+    return list(reversed(records))
+
+
 def collect_readiness_failure(output: Path, report: dict[str, Any]) -> None:
     """Retain the primary failure plus bounded ARM log locations, even for Ready Pods.
 
-    Current and previous streams are independent attempts. Missing previous logs
+    Current and previous streams include validated component failures and source
+    locations as independent observations. Missing previous logs
     and other collection failures remain explicit; neither can replace the probe
     failure. No raw log text, exception message or process stream is printed.
     """
@@ -630,6 +742,12 @@ def collect_readiness_failure(output: Path, report: dict[str, Any]) -> None:
                 timeout=20,
             )
             report["serviceLogs"][source] = failure_locations(logs)
+            report["serviceLogs"][source]["componentFailures"] = (
+                component_failure_records(logs)
+            )
+            report["serviceLogs"][source]["componentFailuresTruncated"] = (
+                sum("ARM_READINESS_FAILURE " in line for line in logs.splitlines()) > 50
+            )
         except (OSError, RuntimeError, ValueError, subprocess.TimeoutExpired) as error:
             report["collectionErrors"].append(
                 {

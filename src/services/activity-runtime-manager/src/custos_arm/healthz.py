@@ -23,6 +23,7 @@ from fastapi import APIRouter
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
+from custos_arm._readiness_diagnostics import log_readiness_failure, readiness_cycle
 from custos_arm.scheduler import ActivityScheduler
 
 router = APIRouter()
@@ -38,16 +39,23 @@ async def healthz() -> dict[str, str]:
 
 @router.get("/readyz", include_in_schema=False)
 async def readyz(request: Request) -> JSONResponse:
-    """Require both the readiness gate and the same scheduler type used by the RPC handler."""
+    """Retain a closed readiness-state reason; preserve the existing 503 body and timeout."""
+    with readiness_cycle("readiness"):
+        return await _readiness_response(request)
+
+
+async def _readiness_response(request: Request) -> JSONResponse:
+    """Require the existing gate/scheduler/dependencies, sharing cycle identity with probes."""
     if getattr(request.app.state, "ready", False):
         if isinstance(getattr(request.app.state, "scheduler", None), ActivityScheduler):
             probe = getattr(request.app.state, "readiness_probe", None)
             if probe is not None:
                 try:
                     await asyncio.wait_for(probe(), timeout=8)
-                except (TimeoutError, RuntimeError, SPLError, httpx.HTTPError):
+                except (TimeoutError, RuntimeError, SPLError, httpx.HTTPError) as error:
                     request.app.state.dependencies_ready = False
                     logger.warning("Activity runtime dependency readiness failed")
+                    log_readiness_failure("dependencies", "error", error)
                     return JSONResponse(
                         {"status": "not_ready", "detail": "runtime dependency unavailable"},
                         status_code=503,
@@ -55,7 +63,9 @@ async def readyz(request: Request) -> JSONResponse:
                 request.app.state.dependencies_ready = True
             return JSONResponse({"status": "ready"})
         detail = SCHEDULER_NOT_CONFIGURED
+        log_readiness_failure("scheduler", "scheduler_missing")
     else:
+        log_readiness_failure("lifecycle", "gate_closed")
         detail = getattr(
             request.app.state,
             "ready_detail",
