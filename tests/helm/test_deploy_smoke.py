@@ -4,13 +4,16 @@ import asyncio
 import io
 import json
 import runpy
+import ssl
 import subprocess
 import sys
+import urllib.error
+import urllib.request
 from email.message import Message
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, MagicMock, Mock
 
 import pytest
 import yaml
@@ -290,6 +293,276 @@ def test_command_failure_does_not_echo_private_process_output(
         )
     assert "sensitive" not in str(result.value)
     assert "private" not in str(result.value)
+
+
+def test_readiness_failure_retains_probe_cause_and_ready_arm_logs(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Keep a real child probe's HTTP failure and both log streams, never private content."""
+    from contextlib import redirect_stdout
+
+    monkeypatch.setenv("NS", "custos-system")
+    monkeypatch.setenv("GITHUB_SHA", TAG)
+    monkeypatch.setenv("ARM_RUNTIME_ENABLED", "true")
+    monkeypatch.setenv("ARM_ARTIFACT_STORE", "csi")
+    monkeypatch.setattr(ssl, "create_default_context", Mock())
+    body = io.BytesIO(b"syntheticPrivateBody")
+    calls: list[list[str]] = []
+
+    def reject(*args: Any, **kwargs: Any) -> None:
+        """Simulate a real HTTP rejection with private URL, headers and body."""
+        raise urllib.error.HTTPError(
+            "https://private/?token=syntheticPrivateURL",
+            503,
+            "syntheticPrivateMessage",
+            Message(),
+            body,
+        )
+
+    def run(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        """Execute the actual serialized probe; supply logs without a Pod-readiness filter."""
+        calls.append(args)
+        if "exec" in args:
+            stream = io.StringIO()
+            program = tmp_path / "readiness_probe.py"
+            program.write_text(args[-1])
+            with redirect_stdout(stream), pytest.raises(SystemExit) as exited:
+                runpy.run_path(str(program))
+            code = exited.value.code
+            assert isinstance(code, int)
+            return subprocess.CompletedProcess(
+                args, code, stream.getvalue(), "syntheticPrivateStderr"
+            )
+        assert "logs" in args and "activity-runtime-manager" in args
+        assert "--tail=200" in args and "--limit-bytes=32768" in args
+        return subprocess.CompletedProcess(
+            args,
+            0,
+            'File "/private/resources.py", line 221, in probe_dependencies\n'
+            "syntheticPrivateMessage",
+            "",
+        )
+
+    monkeypatch.setattr(urllib.request, "urlopen", reject)
+    monkeypatch.setattr(subprocess, "run", run)
+    output = tmp_path / "runtime-evidence.json"
+    with pytest.raises(RuntimeError):
+        smoke.verify(output)
+    report = json.loads((tmp_path / "runtime-readiness-diagnostics.json").read_text())
+    assert report["sha"] == TAG and report["readinessProofFailed"] is True
+    assert report["probe"]["category"] == "http_status"
+    assert report["probe"]["httpStatus"] == 503
+    assert report["probe"]["errorType"] == "HTTPError"
+    assert report["probe"]["frames"]
+    assert report["collectionErrors"] == []
+    assert set(report["serviceLogs"]) == {"arm-current", "arm-previous"}
+    assert all(
+        row["frames"]
+        == [{"file": "resources.py", "line": 221, "function": "probe_dependencies"}]
+        for row in report["serviceLogs"].values()
+    )
+    assert len(calls) == 3 and "--previous" in calls[-1]
+    assert body.closed
+    assert not output.exists()
+    retained = json.dumps(report) + capsys.readouterr().out
+    assert "syntheticPrivate" not in retained and "/private/" not in retained
+
+
+@pytest.mark.parametrize(
+    "error,category",
+    [
+        (
+            subprocess.TimeoutExpired(["private"], 30, output="syntheticPrivate"),
+            "exec_timeout",
+        ),
+        (FileNotFoundError("syntheticPrivate"), "exec_unavailable"),
+        (None, "exec_exit"),
+    ],
+)
+def test_readiness_exec_failures_survive_secondary_collection_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    error: Exception | None,
+    category: str,
+) -> None:
+    """Retain the primary exec failure when current/previous log collection also fails."""
+    monkeypatch.setenv("NS", "custos-system")
+    monkeypatch.setenv("GITHUB_SHA", TAG)
+
+    def run(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        """Reject exec separately from the independently failing log commands."""
+        if "exec" in args:
+            if error is not None:
+                raise error
+            return subprocess.CompletedProcess(args, 1, "", "syntheticPrivate")
+        raise OSError("syntheticPrivate")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    with pytest.raises((RuntimeError, OSError, subprocess.TimeoutExpired)) as raised:
+        smoke.verify(tmp_path / "runtime-evidence.json")
+    if error is not None:
+        assert raised.value is error
+    text = (tmp_path / "runtime-readiness-diagnostics.json").read_text()
+    report = json.loads(text)
+    assert report["failure"]["category"] == category
+    assert report["probe"] is None
+    assert [row["source"] for row in report["collectionErrors"]] == [
+        "arm-current",
+        "arm-previous",
+    ]
+    assert "syntheticPrivate" not in text
+
+
+@pytest.mark.parametrize(
+    "kind,category,error_type",
+    [
+        ("tls", "tls", "SSLCertVerificationError"),
+        ("timeout", "timeout", "TimeoutError"),
+        ("ca-file", "tls", "FileNotFoundError"),
+        ("configuration", "configuration", "AssertionError"),
+        ("json", "invalid_response", "JSONDecodeError"),
+        ("status", "invalid_response", "AssertionError"),
+        ("oversized", "invalid_response", "ValueError"),
+    ],
+)
+def test_readiness_probe_categorizes_failures_without_response_or_exception_text(
+    monkeypatch: pytest.MonkeyPatch,
+    kind: str,
+    category: str,
+    error_type: str,
+) -> None:
+    """Distinguish trusted-probe failures and cap response reads without retaining private data."""
+    monkeypatch.setenv(
+        "ARM_RUNTIME_ENABLED", "true" if kind != "configuration" else "false"
+    )
+    monkeypatch.setenv("ARM_ARTIFACT_STORE", "csi")
+    tls = Mock()
+    if kind == "ca-file":
+        tls.side_effect = FileNotFoundError("syntheticPrivateCA")
+    monkeypatch.setattr(ssl, "create_default_context", tls)
+    response = MagicMock(status=200)
+    response.__enter__.return_value = response
+    response.read.return_value = {
+        "json": b"syntheticPrivateBody",
+        "status": b'{"status":"syntheticPrivateStatus"}',
+        "oversized": b"x" * 4097,
+    }.get(kind, b'{"status":"ready"}')
+    urlopen = Mock(return_value=response)
+    if kind in {"tls", "timeout"}:
+        root = (
+            ssl.SSLCertVerificationError("syntheticPrivateCertificate")
+            if kind == "tls"
+            else TimeoutError("syntheticPrivateTimeout")
+        )
+        urlopen.side_effect = urllib.error.URLError(root)
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+    report = smoke.readiness_probe()
+    assert report["ready"] is False
+    assert report["category"] == category and report["errorType"] == error_type
+    assert report["frames"] and len(report["frames"]) <= 5
+    if kind in {"json", "status", "oversized"}:
+        response.read.assert_called_once_with(4097)
+        response.__exit__.assert_called_once()
+    assert "syntheticPrivate" not in json.dumps(report)
+
+
+def test_successful_readiness_keeps_original_evidence_and_skips_failure_collection(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A trusted ready response emits only the existing success artifact and executes once."""
+    monkeypatch.setenv("NS", "custos-system")
+    monkeypatch.setenv("GITHUB_SHA", TAG)
+    monkeypatch.setenv("ARM_RUNTIME_ENABLED", "true")
+    monkeypatch.setenv("ARM_ARTIFACT_STORE", "csi")
+    monkeypatch.setattr(ssl, "create_default_context", Mock())
+    response = MagicMock(status=200)
+    response.__enter__.return_value = response
+    body = b'{"status":"ready","private":"syntheticPrivate"}'
+    response.read.return_value = body + b" " * (4096 - len(body))
+    monkeypatch.setattr(urllib.request, "urlopen", Mock(return_value=response))
+    probe = smoke.readiness_probe()
+    assert probe["ready"] is True
+    run = Mock(
+        return_value=subprocess.CompletedProcess(
+            [], 0, "RUNTIME_READINESS_PROBE " + json.dumps(probe), ""
+        )
+    )
+    monkeypatch.setattr(subprocess, "run", run)
+    output = tmp_path / "runtime-evidence.json"
+    smoke.verify(output)
+    report = json.loads(output.read_text())
+    assert report["actualSchedulerReady"] is True and report["sha"] == TAG
+    assert run.call_count == 1
+    assert "syntheticPrivate" not in output.read_text()
+    assert not (tmp_path / "runtime-readiness-diagnostics.json").exists()
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"httpStatus": True},
+        {"phase": ["syntheticPrivate"]},
+        {"errorType": "syntheticPrivate"},
+        {"frames": [{"file": "/private/source.py", "function": "probe", "line": 1}]},
+        {"private": "syntheticPrivate" * 700},
+    ],
+)
+def test_malformed_readiness_record_is_an_explicit_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    change: dict[str, Any],
+) -> None:
+    """Reject malformed producer records without retaining their unsafe fields or claiming success."""
+    monkeypatch.setenv("NS", "custos-system")
+    monkeypatch.setenv("GITHUB_SHA", TAG)
+    row = {
+        "ready": False,
+        "phase": "request",
+        "category": "http_status",
+        "errorType": "HTTPError",
+        "httpStatus": 503,
+        "frames": [],
+    } | change
+    run = Mock(
+        return_value=subprocess.CompletedProcess(
+            [], 0, "RUNTIME_READINESS_PROBE " + json.dumps(row), ""
+        )
+    )
+    monkeypatch.setattr(subprocess, "run", run)
+    with pytest.raises(ValueError):
+        smoke.verify(tmp_path / "runtime-evidence.json")
+    text = (tmp_path / "runtime-readiness-diagnostics.json").read_text()
+    report = json.loads(text)
+    assert report["failure"]["category"] == "invalid_probe_record"
+    assert report["probe"] is None
+    assert "syntheticPrivate" not in text and "/private/" not in text
+    assert not (tmp_path / "runtime-evidence.json").exists()
+
+
+def test_readiness_artifact_write_failure_preserves_the_original_probe_error(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Keep the original error and safe stdout evidence when the artifact cannot be written."""
+    monkeypatch.setenv("NS", "custos-system")
+    monkeypatch.setenv("GITHUB_SHA", TAG)
+    error = subprocess.TimeoutExpired(["private"], 30, stderr="syntheticPrivate")
+    monkeypatch.setattr(subprocess, "run", Mock(side_effect=error))
+    with pytest.raises(subprocess.TimeoutExpired) as raised:
+        smoke.verify(tmp_path / "absent" / "runtime-evidence.json")
+    assert raised.value is error
+    text = capsys.readouterr().out
+    report = json.loads(text)
+    assert report["failure"]["category"] == "exec_timeout"
+    assert report["collectionErrors"][-1] == {
+        "source": "artifact",
+        "errorType": "OSError",
+    }
+    assert "syntheticPrivate" not in text
 
 
 def test_preseed_grants_only_workspace_execution_and_closes_pool(

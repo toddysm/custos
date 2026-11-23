@@ -126,6 +126,22 @@ opening RPC channels. This is local causal evidence, not deployed certification.
 For a failed deployed proof:
 
 1. Retain `runtime-smoke-evidence` before the disposable cluster is removed.
+   If scheduler readiness fails before public execution, inspect
+   `runtime-readiness-diagnostics.json` instead: it records the tested SHA,
+   command exit code and a closed exec/probe failure category. The single
+   trusted HTTPS check distinguishes configuration, TLS, timeout, transport,
+   HTTP status and invalid response failures without retaining response bodies,
+   environment values, URLs or exception messages. It does not retry readiness
+   or the public POST.
+   Current and previous ARM logs are collected even when Kubernetes reports
+   the Pod Ready, but retain only bounded filename/function/line locations.
+   These uncorrelated locations do not prove which dependency failed.
+   Missing previous logs and other collection errors remain explicit in
+   `collectionErrors`; diagnostic-only output is never readiness success.
+   If artifact writing fails, the same sanitized report remains in the runner
+   log with an explicit artifact error; the original probe failure still fails
+   verification.
+   The success-only `runtime-evidence.json` contract is unchanged.
    Inspect `public-workflow-diagnostics.json` for the tested SHA, `failedPhase`,
    `publicRequests`, `dependencyFailures`, `candidateRuns`, `terminalRuns`,
    `causalFailures` and `collectionErrors`.
