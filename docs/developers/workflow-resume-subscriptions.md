@@ -126,6 +126,47 @@ opening RPC channels. This is local causal evidence, not deployed certification.
 For a failed deployed proof:
 
 1. Retain `runtime-smoke-evidence` before the disposable cluster is removed.
+   If scheduler readiness fails before public execution, inspect
+   `runtime-readiness-diagnostics.json` instead: it records the tested SHA,
+   command exit code and a closed exec/probe failure category. The single
+   trusted HTTPS check distinguishes configuration, TLS, timeout, transport,
+   HTTP status and invalid response failures without retaining response bodies,
+   environment values, URLs or exception messages. It does not retry readiness
+   or the public POST.
+   Current and previous ARM logs are collected even when Kubernetes reports
+   the Pod Ready; raw log lines are not retained.
+   `serviceLogs` also retains validated `ARM_READINESS_FAILURE` records as
+   `componentFailures`: a closed component/reason/type, numeric upstream status,
+   at most five source frames, `startup`/`readiness` phase and an opaque probe-cycle ID.
+   Components cover metadata/schema checks, artifacts, execution authorization,
+   Catalog/Connector readiness and Kubernetes Job/Pod reads. Readiness rejections
+   distinguish a closed lifecycle gate, missing scheduler and failed dependency
+   cycle. Member failures are logged **before** concurrent errors are grouped;
+   sibling cancellation alone is not a component failure.
+   Secret resolution and Auth exchange share the `execution-authorization`
+   boundary: the existing client deliberately sanitizes their errors, so this
+   label does not distinguish those two operations or recover hidden status.
+   Cycles are independent, and previous-instance records are historical;
+   neither source-only locations nor an unrelated cycle proves the active
+   HTTP request's cause. A group deadline without a member failure does not
+   identify a failed component. Collection requests each stream's last 200 lines,
+   capped at the **first** 32 KiB of that tail. `logByteLimitReached` marks a
+   sample that may omit the newest lines; an unterminated final line at the cap
+   is discarded so it cannot invalidate earlier complete records. Log-only
+   replacement decoding tolerates a cap inside a UTF-8 character; other
+   command consumers still decode strictly.
+   The last 50 component records **within that sample** are retained.
+   `componentFailuresTruncated` marks either the byte cap or the 50-record cap;
+   it does not claim that the newest records in the original stream survived.
+   Other invalid or oversized retained records still fail collection explicitly.
+   No private error
+   text, resource names, endpoints, payloads or credentials are retained.
+   Missing previous logs and other collection errors remain explicit in
+   `collectionErrors`; diagnostic-only output is never readiness success.
+   If artifact writing fails, the same sanitized report remains in the runner
+   log with an explicit artifact error; the original probe failure still fails
+   verification.
+   The success-only `runtime-evidence.json` contract is unchanged.
    Inspect `public-workflow-diagnostics.json` for the tested SHA, `failedPhase`,
    `publicRequests`, `dependencyFailures`, `candidateRuns`, `terminalRuns`,
    `causalFailures` and `collectionErrors`.

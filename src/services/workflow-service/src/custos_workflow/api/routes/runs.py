@@ -63,6 +63,7 @@ from typing import Annotated
 from custos_spl.pagination import Cursor
 from fastapi import APIRouter, Body, Depends, Header, Path, Query, Request
 
+from custos_workflow._public_diagnostics import log_public_start_failure
 from custos_workflow.api.dependencies import (
     get_call_context,
     get_run_controller,
@@ -82,7 +83,7 @@ from custos_workflow.runs.controller import RunController, RunRef
 from custos_workflow.runs.errors import WorkflowRuntimeUnavailableError
 from custos_workflow.runs.ids import RunId
 from custos_workflow.runs.model import RunRecord, RunStatus
-from custos_workflow.runs.public_start import PublicRunStarter, log_public_start_failure
+from custos_workflow.runs.public_start import PublicRunStarter
 from custos_workflow.validator import StartRunValidator
 
 __all__ = ["ref_response_from_ref", "resolve_idempotency_key", "router"]

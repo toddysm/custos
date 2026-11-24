@@ -19,12 +19,17 @@ from custos_csi.adapters import make_adapter
 from custos_pg import PgMetadataAdapter
 from custos_pg.adapters.lease import PgLeaseAdapter
 from custos_pg.pool import LazyPool
-from custos_spl.errors import MigrationRequired, SPLError
+from custos_spl.errors import MigrationRequired
 from custos_spl.ids import WorkspaceId
 from custos_spl.interfaces.metadata_store import MetadataStoreProvider
-from kubernetes.client.exceptions import ApiException
-from urllib3.exceptions import HTTPError as KubernetesTransportError
 
+from custos_arm._readiness_diagnostics import (
+    PROBE_ERRORS,
+    Component,
+    log_readiness_failure,
+    probe_component,
+    readiness_cycle,
+)
 from custos_arm.config import Settings, SettingsError
 from custos_arm.credential_proxy import CredentialProxy
 from custos_arm.io import IOBroker
@@ -66,7 +71,7 @@ class RuntimeResources:
 
 @asynccontextmanager
 async def open_runtime(settings: Settings) -> AsyncIterator[RuntimeResources]:
-    """Build and probe PostgreSQL, CSI, HTTP and Kubernetes resources on the owning lifespan."""
+    """Build/probe owned resources; log closed component evidence without changing admission."""
     settings.read_sidecar_ca_bundle()
     bindings = load_execution_bindings(os.environ)
     if bindings is None:
@@ -85,13 +90,19 @@ async def open_runtime(settings: Settings) -> AsyncIterator[RuntimeResources]:
         pool = LazyPool(settings.metadata_store)
         stack.push_async_callback(pool.aclose)
         metadata = PgMetadataAdapter(lazy=pool)
-        await metadata.check_activity_execution_ready()
-        await metadata.check_execution_identity_ready()
-        leases = PgLeaseAdapter(lazy=pool)
-        await leases.refresh_declared()
-        if 2 not in leases.declared_revisions.get("LeaseStoreProvider", frozenset()):
-            raise MigrationRequired([("LeaseStoreProvider", 2)])
-        await metadata.read_activity_execution("__runtime_probe__", "probe", "probe", 1)
+        with readiness_cycle("startup"):
+            await probe_component("metadata-schema", metadata.check_activity_execution_ready())
+            await probe_component("execution-schema", metadata.check_execution_identity_ready())
+            leases = PgLeaseAdapter(lazy=pool)
+            await probe_component("lease-schema", leases.refresh_declared())
+            if 2 not in leases.declared_revisions.get("LeaseStoreProvider", frozenset()):
+                error = MigrationRequired([("LeaseStoreProvider", 2)])
+                log_readiness_failure("lease-schema", "error", error)
+                raise error
+            await probe_component(
+                "metadata",
+                metadata.read_activity_execution("__runtime_probe__", "probe", "probe", 1),
+            )
         artifacts = make_adapter()
         probe = uuid4().bytes
 
@@ -172,70 +183,92 @@ async def open_runtime(settings: Settings) -> AsyncIterator[RuntimeResources]:
 
         probe_lock = asyncio.Lock()
 
-        async def probe_service(endpoint: str, headers: dict[str, str]) -> None:
-            """Check availability without retaining or consuming an unbounded response body."""
-            async with http.stream(
-                "GET", endpoint.rstrip("/") + "/readyz", headers=headers, timeout=2
-            ) as result:
-                if result.status_code != 200:
-                    raise RuntimeError("runtime dependency is unavailable")
+        async def probe_service(
+            component: Component, endpoint: str, headers: dict[str, str]
+        ) -> None:
+            """Retain component/status on failure without consuming or logging response bodies."""
+            status = None
+            try:
+                async with http.stream(
+                    "GET", endpoint.rstrip("/") + "/readyz", headers=headers, timeout=2
+                ) as result:
+                    status = result.status_code
+                    if status != 200:
+                        raise RuntimeError("runtime dependency is unavailable")
+            except PROBE_ERRORS as error:
+                log_readiness_failure(
+                    component,
+                    "http_status" if status is not None and status != 200 else "error",
+                    error,
+                    http_status=status,
+                )
+                raise
 
         async def probe_authorization() -> None:
             """Exercise the configured secret/Auth path using one explicit diagnostic identity."""
-            headers = await execution.headers(bindings.identities[0], "catalog-activity-read")
-            await probe_service(settings.catalog_endpoint, headers)
+            headers = await probe_component(
+                "execution-authorization",
+                execution.headers(bindings.identities[0], "catalog-activity-read"),
+            )
+            await probe_service("catalog", settings.catalog_endpoint, headers)
 
         async def probe_dependencies() -> None:
-            """Recheck every required collaborator under one elapsed-time and cleanup boundary."""
+            """Recheck collaborators, logging their causes before the unchanged group conversion."""
             async with probe_lock:
-                try:
-                    async with asyncio.timeout(5), asyncio.TaskGroup() as probes:
-                        probes.create_task(
-                            metadata.read_activity_execution(
-                                "__runtime_probe__",
-                                "probe",
-                                "probe",
-                                1,
-                            )
-                        )
-                        probes.create_task(probe_artifacts())
-                        probes.create_task(probe_authorization())
-                        probes.create_task(
-                            probe_service(settings.connector_endpoint, probe_headers)
-                        )
-                        probes.create_task(
-                            _blocking_probe(
-                                partial(
-                                    batch.list_namespaced_job,
-                                    settings.sandbox_namespace,
-                                    limit=1,
-                                    _request_timeout=2,
+                with readiness_cycle("readiness"):
+                    try:
+                        async with asyncio.timeout(5), asyncio.TaskGroup() as probes:
+                            probes.create_task(
+                                probe_component(
+                                    "metadata",
+                                    metadata.read_activity_execution(
+                                        "__runtime_probe__",
+                                        "probe",
+                                        "probe",
+                                        1,
+                                    ),
                                 )
                             )
-                        )
-                        probes.create_task(
-                            _blocking_probe(
-                                partial(
-                                    core.list_namespaced_pod,
-                                    settings.sandbox_namespace,
-                                    limit=1,
-                                    _request_timeout=2,
+                            probes.create_task(probe_component("artifacts", probe_artifacts()))
+                            probes.create_task(probe_authorization())
+                            probes.create_task(
+                                probe_service(
+                                    "connector", settings.connector_endpoint, probe_headers
                                 )
                             )
-                        )
-                except* (
-                    SPLError,
-                    httpx.HTTPError,
-                    RuntimeError,
-                    ApiException,
-                    KubernetesTransportError,
-                    OSError,
-                    TimeoutError,
-                ):
-                    raise RuntimeError("required runtime dependency probe failed") from None
+                            probes.create_task(
+                                probe_component(
+                                    "kubernetes-jobs",
+                                    _blocking_probe(
+                                        partial(
+                                            batch.list_namespaced_job,
+                                            settings.sandbox_namespace,
+                                            limit=1,
+                                            _request_timeout=2,
+                                        )
+                                    ),
+                                )
+                            )
+                            probes.create_task(
+                                probe_component(
+                                    "kubernetes-pods",
+                                    _blocking_probe(
+                                        partial(
+                                            core.list_namespaced_pod,
+                                            settings.sandbox_namespace,
+                                            limit=1,
+                                            _request_timeout=2,
+                                        )
+                                    ),
+                                )
+                            )
+                    except* PROBE_ERRORS as errors:
+                        log_readiness_failure("dependencies", "group_failed", errors)
+                        raise RuntimeError("required runtime dependency probe failed") from None
 
         try:
-            await probe_dependencies()
+            with readiness_cycle("startup"):
+                await probe_dependencies()
             yield RuntimeResources(
                 scheduler,
                 CredentialProxy(metadata, execution, http, settings.connector_endpoint),

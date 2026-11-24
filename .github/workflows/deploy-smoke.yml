@@ -303,6 +303,7 @@ jobs:
           name: runtime-smoke-evidence
           path: |
             ${{ runner.temp }}/runtime-evidence.json
+            ${{ runner.temp }}/runtime-readiness-diagnostics.json
             ${{ runner.temp }}/public-workflow-evidence.json
             ${{ runner.temp }}/public-workflow-diagnostics.json
             ${{ runner.temp }}/controlled-failure-evidence.json

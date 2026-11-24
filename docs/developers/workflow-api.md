@@ -159,6 +159,58 @@ only bounded phase/status/source fields, never bearer/context tokens, request
 bodies or raw error messages; see the
 [failure-evidence procedure](workflow-resume-subscriptions.md#deterministic-registration-time-and-failure-evidence).
 
+At the Gateway's `dapr-route` boundary, a non-null `errorType` is valid only on
+`kind: transport` records and retains a closed exception type (or `unrecognized`).
+Status records must omit it or use null; the collector rejects inconsistent
+pairings without changing error-type semantics at other dependency boundaries.
+For upstream 5xx responses, `responseEnvelope` distinguishes a
+`dapr-error-envelope`, `workflow-error-envelope`, or `unrecognized` body before
+the unchanged public 503 masking. `upstreamErrorCode` retains only
+`ERR_DIRECT_INVOKE`, `ERR_APP_CHANNEL_NIL`, or
+`workflow.workflow_runtime_unavailable` with the matching envelope.
+Only error JSON of at most 16 KiB is inspected; oversized, malformed and
+ambiguous bodies are unrecognized and no body or message is retained.
+Duplicate members in any object, including ignored nested fields, and non-JSON
+`NaN`/`Infinity` constants are rejected before envelope classification.
+Null envelope/code fields indicate unavailable evidence, including transport
+failures and legacy records. The collector validates these pairings against
+the request correlation. An observed envelope shape is **not proof of its origin
+or the underlying cause**; missing Workflow records do not prove handler entry
+never occurred, and a healthy later run cannot explain an earlier 503.
+
+#### Authentication failures before handler entry
+
+`WORKFLOW_PUBLIC_START_FAILURE` also covers public middleware rejections, before
+validation, durable acceptance or run-ID allocation. These records use
+`phase: authentication` for mesh/JWT/scope rejection or `phase: jwks` with
+`reason: jwks_unavailable` for unavailable verification keys. Correlation must be
+one canonical UUID header; absent, malformed or duplicate correlation is recorded
+as unavailable, never copied as arbitrary text.
+
+The fixed `reason`, allowlisted causal `errorType` and bounded source frames
+distinguish key-fetch HTTP, transport and decoding failures. `responseStatus`
+is the Workflow response (for example 503); `httpStatus`, when present, is the
+upstream JWKS HTTP status (for example 500). A pre-handler rejection has no run ID.
+No token, key ID, JWT claim, URL, payload or exception message is retained.
+The smoke failure collector matches these records to the public request even
+when the Workflow pod is Ready and no run was accepted; malformed records produce
+an explicit collection error. Public responses and retry behavior are unchanged.
+
+Readiness is **not** evidence that public authentication keys are available:
+the existing startup gate checks metadata and the workflow worker, while the
+public verifier fetches JWKS lazily. A first key-fetch failure can therefore
+return 503 while `/readyz` remains 200. This is now observable, not silently fixed.
+Do not add blind public POST retries or infer the cause of an earlier failure
+from a later successful request.
+
+Readiness-gating evaluation: prefer a separately designed, bounded initial
+JWKS warm-up for enforced public authentication over performing an Auth request
+on every readiness probe. It would need a public verifier/cache warm-up API,
+usable-key validation, a startup deadline and failure/recovery tests. It would
+also make Auth/sidecar reachability a startup dependency and would not prevent
+later cache-refresh failures. No gating or key-refresh policy change is enabled
+here, and health probes remain unauthenticated.
+
 The boundary with the Run Controller is sharp: the API Adapter
 **never** touches Dapr Workflow, the persistent run store, the
 metadata-store provider, or the step / activity wiring. It owns

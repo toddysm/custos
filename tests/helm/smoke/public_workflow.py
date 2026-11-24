@@ -24,7 +24,7 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 WORKSPACE = "workspace-default"
@@ -60,9 +60,28 @@ DIAGNOSTIC_ERROR_TYPES = frozenset(
         "TypeError",
         "AttributeError",
         "KeyError",
+        "InvalidCallContextError",
+        "MeshAuthenticationError",
+        "HTTPStatusError",
+        "ConnectError",
+        "ConnectTimeout",
+        "ReadError",
+        "ReadTimeout",
+        "WriteError",
+        "WriteTimeout",
+        "PoolTimeout",
+        "RemoteProtocolError",
+        "JSONDecodeError",
+        "UnicodeDecodeError",
         "unrecognized",
     }
 )
+DIAGNOSTIC_ENVELOPE_CODES: Final[dict[str | None, frozenset[str | None]]] = {
+    None: frozenset({None}),
+    "unrecognized": frozenset({None}),
+    "dapr-error-envelope": frozenset({"ERR_DIRECT_INVOKE", "ERR_APP_CHANNEL_NIL"}),
+    "workflow-error-envelope": frozenset({"workflow.workflow_runtime_unavailable"}),
+}
 
 
 def workflow_document() -> dict[str, Any]:
@@ -1220,7 +1239,14 @@ def diagnostic_source_frames(value: object) -> list[dict[str, Any]]:
 def dependency_failure_records(
     logs: str, correlations: set[str], source: str
 ) -> list[dict[str, Any]]:
-    """Keep only matched request-boundary records with fixed taxonomy and bounded source frames."""
+    """Keep matched failures with closed taxonomy and bounded source frames.
+
+    Pre-handler authentication failures require a fixed reason and explicit
+    response status, separate from upstream HTTP status; they have no run ID.
+    Gateway route error types require transport-kind records; envelope evidence
+    uses a closed code/shape pairing. Legacy or transport-only records have no
+    envelope. Shape alone does not prove origin; inconsistent records raise.
+    """
     prefix = (
         "GATEWAY_DEPENDENCY_FAILURE "
         if source == "api-gateway"
@@ -1243,6 +1269,8 @@ def dependency_failure_records(
                 "callctx-sign",
                 "request-key",
                 "dapr-route",
+                "authentication",
+                "jwks",
                 "activation",
                 "lookup",
                 "identity",
@@ -1261,6 +1289,12 @@ def dependency_failure_records(
                 "unconfigured",
             }
             or row.get("errorType") not in DIAGNOSTIC_ERROR_TYPES | {None}
+            or (
+                source == "api-gateway"
+                and row.get("phase") == "dapr-route"
+                and row.get("errorType") is not None
+                and row.get("kind") != "transport"
+            )
             or (
                 row.get("runId") is not None
                 and (
@@ -1302,6 +1336,57 @@ def dependency_failure_records(
             }
         ):
             raise ValueError("dependency diagnostic has invalid taxonomy or status")
+        authentication = row.get("phase") in {"authentication", "jwks"}
+        if authentication and (
+            source != "workflow-service"
+            or row.get("runId") is not None
+            or row.get("reason")
+            not in {
+                "verifier_unavailable",
+                "mesh_unavailable",
+                "mesh_unauthenticated",
+                "mesh_caller_denied",
+                "missing_header",
+                "duplicate_header",
+                "malformed_token",
+                "missing_kid",
+                "unknown_kid",
+                "bad_algorithm",
+                "bad_signature",
+                "expired",
+                "not_yet_valid",
+                "wrong_audience",
+                "wrong_issuer",
+                "missing_claim",
+                "jwks_unavailable",
+                "scope_denied",
+                "route_denied",
+                "unrecognized",
+            }
+            or type(row.get("responseStatus")) is not int
+            or row["responseStatus"] not in {401, 403, 503}
+            or (row["phase"] == "jwks") != (row.get("reason") == "jwks_unavailable")
+        ):
+            raise ValueError("authentication diagnostic has invalid reason or status")
+        envelope = row.get("responseEnvelope")
+        upstream_code = row.get("upstreamErrorCode")
+        if (
+            (envelope is not None and not isinstance(envelope, str))
+            or envelope not in DIAGNOSTIC_ENVELOPE_CODES
+            or (upstream_code is not None and not isinstance(upstream_code, str))
+            or upstream_code not in DIAGNOSTIC_ENVELOPE_CODES[envelope]
+            or (
+                envelope is not None
+                and (
+                    source != "api-gateway"
+                    or row["phase"] != "dapr-route"
+                    or row.get("kind") != "status"
+                    or type(row.get("httpStatus")) is not int
+                    or not 500 <= row["httpStatus"] <= 599
+                )
+            )
+        ):
+            raise ValueError("dependency diagnostic has invalid envelope evidence")
         safe_frames = diagnostic_source_frames(row.get("frames", []))
         records.append(
             {
@@ -1320,6 +1405,22 @@ def dependency_failure_records(
                         "grpcStatus",
                     )
                 },
+                **(
+                    {
+                        "responseEnvelope": envelope,
+                        "upstreamErrorCode": upstream_code,
+                    }
+                    if source == "api-gateway"
+                    else {}
+                ),
+                **(
+                    {
+                        "reason": row["reason"],
+                        "responseStatus": row["responseStatus"],
+                    }
+                    if authentication
+                    else {}
+                ),
                 "frames": safe_frames,
             }
         )

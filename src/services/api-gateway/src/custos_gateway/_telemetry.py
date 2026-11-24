@@ -65,6 +65,27 @@ _tracer = trace.get_tracer(_INSTRUMENTATION_NAME, _INSTRUMENTATION_VERSION)
 _meter = metrics.get_meter(_INSTRUMENTATION_NAME, _INSTRUMENTATION_VERSION)
 logger = logging.getLogger(__name__)
 
+DEPENDENCY_DAPR_CODES: Final[frozenset[str]] = frozenset(
+    {"ERR_DIRECT_INVOKE", "ERR_APP_CHANNEL_NIL"}
+)
+DEPENDENCY_WORKFLOW_CODES: Final[frozenset[str]] = frozenset(
+    {"workflow.workflow_runtime_unavailable"}
+)
+DEPENDENCY_UPSTREAM_CODES: Final[frozenset[str]] = DEPENDENCY_DAPR_CODES | DEPENDENCY_WORKFLOW_CODES
+_TRANSPORT_ERROR_TYPES: Final[frozenset[str]] = frozenset(
+    {
+        "HTTPStatusError",
+        "ConnectError",
+        "ConnectTimeout",
+        "ReadError",
+        "ReadTimeout",
+        "WriteError",
+        "WriteTimeout",
+        "PoolTimeout",
+        "RemoteProtocolError",
+    }
+)
+
 
 def log_dependency_failure(
     correlation_id: str | None,
@@ -72,12 +93,18 @@ def log_dependency_failure(
     phase: Literal["auth-client", "auth-verify", "callctx-sign", "request-key", "dapr-route"],
     kind: Literal["transport", "status", "decode", "unavailable", "unconfigured"],
     http_status: int | None = None,
+    error_type: str | None = None,
+    response_envelope: Literal["dapr-error-envelope", "workflow-error-envelope", "unrecognized"]
+    | None = None,
+    upstream_error_code: str | None = None,
 ) -> None:
     """Log a fixed dependency boundary without request, response or exception text.
 
     Only canonical UUID correlation IDs are retained. An absent or noncanonical
     inbound ID is explicitly marked unavailable without changing ingress/egress
-    semantics. Status and taxonomy are bounded independently of remote messages.
+    semantics. Transport types and upstream codes are allowlisted independently
+    of remote messages. Envelope classification describes observed wire shape,
+    not verified origin or an underlying cause; ``None`` means unavailable.
     """
     correlation = (
         correlation_id
@@ -98,6 +125,17 @@ def log_dependency_failure(
                 "phase": phase,
                 "kind": kind,
                 "httpStatus": status,
+                "errorType": (
+                    error_type if error_type in _TRANSPORT_ERROR_TYPES else "unrecognized"
+                )
+                if error_type is not None
+                else None,
+                "responseEnvelope": response_envelope,
+                "upstreamErrorCode": (
+                    upstream_error_code
+                    if upstream_error_code in DEPENDENCY_UPSTREAM_CODES
+                    else None
+                ),
             }
         ),
     )
