@@ -9,6 +9,8 @@ cancellation and the Workflow container's production client to confirm runtime
 termination; neither private authority is given to the public client. An opt-in
 controlled invalid-event proof retains failed-step diagnostics separately from
 ordinary lifecycle success and the SDK's public status projection.
+Diagnostic privacy rejection happens before file/log output; CLI command
+timeouts exit nonzero with safe error metadata, never the injected command.
 """
 
 from __future__ import annotations
@@ -21,6 +23,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -1059,12 +1062,16 @@ def collect_failure_diagnostics(
 ) -> None:
     """Retain safe all-phase failure evidence, including known nonterminal candidates.
 
-    Collection errors, including command timeouts, retain only safe type metadata.
+    The source must be the exact tested commit. Collection errors, including
+    command timeouts, retain only safe type metadata. Marker-bearing records are
+    replaced by a privacy-failure report before either file or log output.
     The selected owned Job provides candidate
     correlation; candidate identity alone is not terminal or successful proof.
     """
     import runtime as smoke
 
+    if re.fullmatch(r"[a-f0-9]{40}", sha) is None:
+        raise ValueError("diagnostics require the exact tested commit")
     namespace = os.environ["NS"]
     report: dict[str, Any] = {
         "sha": sha,
@@ -1240,9 +1247,17 @@ def collect_failure_diagnostics(
     report["terminalRuns"] = [
         record for record in candidates.values() if record["status"] is not None
     ]
-    output.with_name("public-workflow-diagnostics.json").write_text(
-        json.dumps(report, indent=2)
-    )
+    serialized = json.dumps(report, indent=2)
+    if any(marker in serialized for marker in FAILURE_MARKERS):
+        report = {
+            "sha": sha,
+            "diagnosticOnly": True,
+            "lifecycleProofFailed": True,
+            "failedPhase": "diagnostic-privacy-rejection",
+            "collectionErrors": [{"source": "privacy", "errorType": "ValueError"}],
+        }
+        serialized = json.dumps(report, indent=2)
+    output.with_name("public-workflow-diagnostics.json").write_text(serialized)
     print(json.dumps(report), flush=True)
 
 
@@ -1866,4 +1881,11 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except subprocess.TimeoutExpired:
+        print(
+            json.dumps({"source": "cli", "errorType": "TimeoutExpired"}),
+            file=sys.stderr,
+        )
+        sys.exit(1)

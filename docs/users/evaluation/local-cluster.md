@@ -54,6 +54,9 @@ accepted input and removed mirror. Synthetic private-data markers must not appea
 in the retained diagnostics, and collector errors fail the proof. The controlled
 collector records command timeouts using only safe source/type metadata; the
 original proof error remains fatal even if diagnostic collection also times out.
+Marker-bearing diagnostics are replaced by safe failure metadata before any
+artifact or log output. CLI command timeouts exit nonzero with a safe error
+category, without printing the injected command or its captured streams.
 The controlled
 report is not ordinary lifecycle success: the SDK can report `completed` for an
 orchestrator returning a failed step, which the current public projection maps

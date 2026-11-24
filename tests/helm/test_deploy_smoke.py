@@ -1511,6 +1511,153 @@ def test_controlled_probe_timeout_collects_evidence_and_preserves_original_error
     assert not output.exists()
 
 
+@pytest.mark.parametrize("marker", public.FAILURE_MARKERS)
+@pytest.mark.parametrize("field", ["file", "function", "stepId", "phase"])
+def test_collector_rejects_schema_valid_markers_before_any_output(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    marker: str,
+    field: str,
+) -> None:
+    """Even schema-valid private markers are replaced before artifact or log publication."""
+    monkeypatch.setenv("NS", "custos-system")
+    run_id = "00000000-0000-5000-8000-000000000000"
+    frame = {"file": "durable.py", "function": "drive_durable_resume", "line": 502}
+    record: dict[str, Any] = {
+        "runId": run_id,
+        "stepId": marker if field == "stepId" else "await-cancellation",
+        "operation": "wait",
+        "phase": "driver",
+        "errorType": "ValueError",
+        "frames": [frame],
+    }
+    if field in {"file", "function"}:
+        frame[field] = marker + ".py" if field == "file" else marker
+
+    def command(args: list[str]) -> str:
+        """Expose the marker only in an owned Workflow-container structured failure."""
+        if (
+            "deployment/custos-workflow-service" in args
+            and args[args.index("-c") + 1] == "workflow-service"
+        ):
+            return "WORKFLOW_RESUME_FAILURE " + json.dumps(record)
+        return ""
+
+    monkeypatch.setitem(sys.modules, "runtime", SimpleNamespace(command=command))
+    monkeypatch.setitem(
+        public.collect_failure_diagnostics.__globals__,
+        "public_start_diagnostics",
+        Mock(return_value=[]),
+    )
+    monkeypatch.setitem(
+        public.collect_failure_diagnostics.__globals__,
+        "service_probe",
+        Mock(return_value={}),
+    )
+    writes: list[str] = []
+    original_write = Path.write_text
+
+    def write_text(
+        path: Path,
+        data: str,
+        encoding: str | None = None,
+        errors: str | None = None,
+        newline: str | None = None,
+    ) -> int:
+        """Reject private markers at every write, not only in the final artifact."""
+        assert all(value not in data for value in public.FAILURE_MARKERS)
+        writes.append(data)
+        return original_write(
+            path, data, encoding=encoding, errors=errors, newline=newline
+        )
+
+    monkeypatch.setattr(Path, "write_text", write_text)
+    public.collect_failure_diagnostics(
+        tmp_path / "evidence.json",
+        TAG,
+        run_id=run_id,
+        phase=marker if field == "phase" else "controlled-wait-failure",
+    )
+    text = (tmp_path / "public-workflow-diagnostics.json").read_text()
+    logged = capsys.readouterr().out
+    report = json.loads(text)
+    assert report["collectionErrors"] == [
+        {"source": "privacy", "errorType": "ValueError"}
+    ]
+    assert report["diagnosticOnly"] is True and report["lifecycleProofFailed"] is True
+    assert writes == [text]
+    assert all(
+        value not in text and value not in logged for value in public.FAILURE_MARKERS
+    )
+    with pytest.raises(ValueError):
+        public.verify_controlled_failure_diagnostics(report, run_id, TAG)
+
+
+def test_collector_rejects_private_source_identity_without_echoing_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Invalid source identity cannot be reflected in the privacy-rejection report."""
+    monkeypatch.setenv("NS", "custos-system")
+    command = Mock()
+    monkeypatch.setitem(sys.modules, "runtime", SimpleNamespace(command=command))
+    with pytest.raises(ValueError, match="exact tested commit"):
+        public.collect_failure_diagnostics(
+            tmp_path / "evidence.json", public.FAILURE_MARKERS[0]
+        )
+    assert not (tmp_path / "public-workflow-diagnostics.json").exists()
+    assert capsys.readouterr().out == ""
+    command.assert_not_called()
+
+
+def test_cli_timeout_excludes_injected_command_and_private_streams(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The actual CLI exits nonzero without exposing an exec-shaped timeout's source or streams."""
+    script = ROOT / "tests/helm/smoke/public_workflow.py"
+    timeout = subprocess.TimeoutExpired(
+        ["kubectl", "exec", "proof-pod", "--", "python", "-c", script.read_text()],
+        150,
+        output=public.FAILURE_MARKERS[0].encode(),
+        stderr=public.FAILURE_MARKERS[1].encode(),
+    )
+    monkeypatch.setitem(
+        sys.modules, "runtime", SimpleNamespace(command=Mock(side_effect=timeout))
+    )
+    for key, value in (
+        ("NS", "custos-system"),
+        ("GITHUB_SHA", TAG),
+        ("CHART", "unused-chart"),
+        ("VALUES", "unused-values"),
+    ):
+        monkeypatch.setenv(key, value)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            str(script),
+            "run",
+            "--controlled-failure",
+            "--values",
+            str(tmp_path / "values.yaml"),
+            "--output",
+            str(tmp_path / "evidence.json"),
+        ],
+    )
+    with pytest.raises(SystemExit) as raised:
+        runpy.run_path(str(script), run_name="__main__")
+    assert raised.value.code == 1
+    captured = capsys.readouterr()
+    assert json.loads(captured.err) == {"source": "cli", "errorType": "TimeoutExpired"}
+    text = (tmp_path / "public-workflow-diagnostics.json").read_text()
+    assert all(
+        marker not in captured.out + captured.err + text
+        for marker in public.FAILURE_MARKERS
+    )
+    assert "Traceback" not in captured.err
+    assert not (tmp_path / "evidence.json").exists()
+
+
 @pytest.mark.parametrize(
     "source", ["public-start", "client-job", "api-gateway", "runtime-state"]
 )
