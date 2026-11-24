@@ -28,7 +28,11 @@ from typing import TYPE_CHECKING, Final, Literal, NoReturn
 
 import httpx
 
-from custos_gateway._telemetry import DEPENDENCY_UPSTREAM_CODES, log_dependency_failure
+from custos_gateway._telemetry import (
+    DEPENDENCY_DAPR_CODES,
+    DEPENDENCY_WORKFLOW_CODES,
+    log_dependency_failure,
+)
 from custos_gateway.clients.auth import (
     DEFAULT_DAPR_HTTP_HOST,
     DEFAULT_DAPR_HTTP_PORT,
@@ -114,12 +118,11 @@ def _failure_response_evidence(
     if not isinstance(body, dict) or ("errorCode" in body and "code" in body):
         return "unrecognized", None
     dapr_code = body.get("errorCode")
-    if isinstance(dapr_code, str) and dapr_code in DEPENDENCY_UPSTREAM_CODES - {
-        "workflow.workflow_runtime_unavailable"
-    }:
+    if isinstance(dapr_code, str) and dapr_code in DEPENDENCY_DAPR_CODES:
         return "dapr-error-envelope", dapr_code
-    if body.get("code") == "workflow.workflow_runtime_unavailable":
-        return "workflow-error-envelope", "workflow.workflow_runtime_unavailable"
+    workflow_code = body.get("code")
+    if isinstance(workflow_code, str) and workflow_code in DEPENDENCY_WORKFLOW_CODES:
+        return "workflow-error-envelope", workflow_code
     return "unrecognized", None
 
 

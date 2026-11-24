@@ -1616,6 +1616,71 @@ def test_dependency_collector_rejects_unclosed_envelope_evidence(
         )
 
 
+@pytest.mark.parametrize(
+    "kind,error_type,envelope",
+    [
+        ("status", "ConnectError", "dapr-error-envelope"),
+        ("status", "unrecognized", None),
+        ("decode", "ReadTimeout", None),
+        (None, "ConnectError", None),
+    ],
+)
+def test_dependency_collector_rejects_route_transport_type_without_transport(
+    kind: str | None, error_type: str, envelope: str | None
+) -> None:
+    """Reject Gateway route exception types on status and legacy nontransport rows."""
+    correlation = "00000000-0000-5000-8000-000000000000"
+    record = {
+        "correlationId": correlation,
+        "phase": "dapr-route",
+        "kind": kind,
+        "errorType": error_type,
+        "httpStatus": 503,
+        "responseEnvelope": envelope,
+        "upstreamErrorCode": "ERR_DIRECT_INVOKE" if envelope else None,
+    }
+    with pytest.raises(ValueError, match="invalid taxonomy"):
+        public.dependency_failure_records(
+            "GATEWAY_DEPENDENCY_FAILURE " + json.dumps(record),
+            {correlation},
+            "api-gateway",
+        )
+
+
+@pytest.mark.parametrize(
+    "source,phase,kind,error_type",
+    [
+        ("api-gateway", "dapr-route", "transport", "ConnectError"),
+        ("api-gateway", "dapr-route", "status", None),
+        ("api-gateway", "auth-client", "status", "HTTPStatusError"),
+        ("workflow-service", "durable-start", None, "OSError"),
+    ],
+)
+def test_dependency_collector_preserves_scoped_error_type_pairings(
+    source: str, phase: str, kind: str | None, error_type: str | None
+) -> None:
+    """Preserve valid route evidence and exception semantics at other boundaries."""
+    correlation = "00000000-0000-5000-8000-000000000000"
+    record = {
+        "correlationId": correlation,
+        "phase": phase,
+        "kind": kind,
+        "errorType": error_type,
+        "httpStatus": 503 if kind == "status" else None,
+    }
+    prefix = (
+        "GATEWAY_DEPENDENCY_FAILURE "
+        if source == "api-gateway"
+        else "WORKFLOW_PUBLIC_START_FAILURE "
+    )
+    captured = public.dependency_failure_records(
+        prefix + json.dumps(record), {correlation}, source
+    )
+    assert len(captured) == 1
+    assert captured[0]["kind"] == kind
+    assert captured[0]["errorType"] == error_type
+
+
 def test_dependency_records_reject_invalid_fields_and_ignore_other_requests() -> None:
     """Only the selected request's closed taxonomy and source fields can reach the artifact."""
     correlation = "00000000-0000-5000-8000-000000000000"

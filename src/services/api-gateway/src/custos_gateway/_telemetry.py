@@ -65,9 +65,13 @@ _tracer = trace.get_tracer(_INSTRUMENTATION_NAME, _INSTRUMENTATION_VERSION)
 _meter = metrics.get_meter(_INSTRUMENTATION_NAME, _INSTRUMENTATION_VERSION)
 logger = logging.getLogger(__name__)
 
-DEPENDENCY_UPSTREAM_CODES: Final[frozenset[str]] = frozenset(
-    {"ERR_DIRECT_INVOKE", "ERR_APP_CHANNEL_NIL", "workflow.workflow_runtime_unavailable"}
+DEPENDENCY_DAPR_CODES: Final[frozenset[str]] = frozenset(
+    {"ERR_DIRECT_INVOKE", "ERR_APP_CHANNEL_NIL"}
 )
+DEPENDENCY_WORKFLOW_CODES: Final[frozenset[str]] = frozenset(
+    {"workflow.workflow_runtime_unavailable"}
+)
+DEPENDENCY_UPSTREAM_CODES: Final[frozenset[str]] = DEPENDENCY_DAPR_CODES | DEPENDENCY_WORKFLOW_CODES
 _TRANSPORT_ERROR_TYPES: Final[frozenset[str]] = frozenset(
     {
         "HTTPStatusError",

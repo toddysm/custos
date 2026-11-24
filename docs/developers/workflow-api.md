@@ -159,8 +159,11 @@ only bounded phase/status/source fields, never bearer/context tokens, request
 bodies or raw error messages; see the
 [failure-evidence procedure](workflow-resume-subscriptions.md#deterministic-registration-time-and-failure-evidence).
 
-At the Gateway's `dapr-route` boundary, `errorType` retains a closed transport
-exception type. For upstream 5xx responses, `responseEnvelope` distinguishes a
+At the Gateway's `dapr-route` boundary, a non-null `errorType` is valid only on
+`kind: transport` records and retains a closed exception type (or `unrecognized`).
+Status records must omit it or use null; the collector rejects inconsistent
+pairings without changing error-type semantics at other dependency boundaries.
+For upstream 5xx responses, `responseEnvelope` distinguishes a
 `dapr-error-envelope`, `workflow-error-envelope`, or `unrecognized` body before
 the unchanged public 503 masking. `upstreamErrorCode` retains only
 `ERR_DIRECT_INVOKE`, `ERR_APP_CHANNEL_NIL`, or
