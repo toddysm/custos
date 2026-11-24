@@ -167,6 +167,8 @@ the unchanged public 503 masking. `upstreamErrorCode` retains only
 `workflow.workflow_runtime_unavailable` with the matching envelope.
 Only error JSON of at most 16 KiB is inspected; oversized, malformed and
 ambiguous bodies are unrecognized and no body or message is retained.
+Duplicate members in any object, including ignored nested fields, and non-JSON
+`NaN`/`Infinity` constants are rejected before envelope classification.
 Null envelope/code fields indicate unavailable evidence, including transport
 failures and legacy records. The collector validates these pairings against
 the request correlation. An observed envelope shape is **not proof of its origin

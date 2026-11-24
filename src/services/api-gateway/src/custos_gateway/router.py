@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Final, Literal
+from typing import TYPE_CHECKING, Final, Literal, NoReturn
 
 import httpx
 
@@ -76,19 +76,39 @@ _TRANSIENT_STATUS_FLOOR: Final[int] = 500
 _FAILURE_RESPONSE_LIMIT_BYTES: Final[int] = 16 * 1024
 
 
+def _unique_error_members(members: list[tuple[str, object]]) -> dict[str, object]:
+    """Reject duplicate members in every decoded object, including ignored fields."""
+    result: dict[str, object] = {}
+    for name, value in members:
+        if name in result:
+            raise ValueError("error envelope has duplicate members")
+        result[name] = value
+    return result
+
+
+def _reject_non_json_constant(value: str) -> NoReturn:
+    """Reject NaN and infinity tokens without retaining their content."""
+    raise ValueError("error envelope has a non-JSON constant")
+
+
 def _failure_response_evidence(
     response: httpx.Response,
 ) -> tuple[Literal["dapr-error-envelope", "workflow-error-envelope", "unrecognized"], str | None]:
     """Classify bounded error JSON without retaining its content or claiming origin.
 
-    Malformed, oversized or ambiguous envelopes remain explicitly unrecognized.
+    Malformed, oversized or ambiguous envelopes remain explicitly unrecognized,
+    including duplicate members at any depth and non-JSON numeric constants.
     Only allowlisted root codes survive; response text never enters diagnostics.
     The bound applies to the already received, decoded body, not transport memory.
     """
     if len(response.content) > _FAILURE_RESPONSE_LIMIT_BYTES:
         return "unrecognized", None
     try:
-        body = json.loads(response.content.decode("utf-8"))
+        body = json.loads(
+            response.content.decode("utf-8"),
+            object_pairs_hook=_unique_error_members,
+            parse_constant=_reject_non_json_constant,
+        )
     except (ValueError, RecursionError):
         return "unrecognized", None
     if not isinstance(body, dict) or ("errorCode" in body and "code" in body):
