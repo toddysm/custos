@@ -22,7 +22,7 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 WORKSPACE = "workspace-default"
@@ -73,6 +73,12 @@ DIAGNOSTIC_ERROR_TYPES = frozenset(
         "unrecognized",
     }
 )
+DIAGNOSTIC_ENVELOPE_CODES: Final[dict[str | None, frozenset[str | None]]] = {
+    None: frozenset({None}),
+    "unrecognized": frozenset({None}),
+    "dapr-error-envelope": frozenset({"ERR_DIRECT_INVOKE", "ERR_APP_CHANNEL_NIL"}),
+    "workflow-error-envelope": frozenset({"workflow.workflow_runtime_unavailable"}),
+}
 
 
 def workflow_document() -> dict[str, Any]:
@@ -1096,6 +1102,9 @@ def dependency_failure_records(
 
     Pre-handler authentication failures require a fixed reason and explicit
     response status, separate from upstream HTTP status; they have no run ID.
+    Gateway route error types require transport-kind records; envelope evidence
+    uses a closed code/shape pairing. Legacy or transport-only records have no
+    envelope. Shape alone does not prove origin; inconsistent records raise.
     """
     prefix = (
         "GATEWAY_DEPENDENCY_FAILURE "
@@ -1139,6 +1148,12 @@ def dependency_failure_records(
                 "unconfigured",
             }
             or row.get("errorType") not in DIAGNOSTIC_ERROR_TYPES | {None}
+            or (
+                source == "api-gateway"
+                and row.get("phase") == "dapr-route"
+                and row.get("errorType") is not None
+                and row.get("kind") != "transport"
+            )
             or (
                 row.get("runId") is not None
                 and (
@@ -1212,6 +1227,25 @@ def dependency_failure_records(
             or (row["phase"] == "jwks") != (row.get("reason") == "jwks_unavailable")
         ):
             raise ValueError("authentication diagnostic has invalid reason or status")
+        envelope = row.get("responseEnvelope")
+        upstream_code = row.get("upstreamErrorCode")
+        if (
+            (envelope is not None and not isinstance(envelope, str))
+            or envelope not in DIAGNOSTIC_ENVELOPE_CODES
+            or (upstream_code is not None and not isinstance(upstream_code, str))
+            or upstream_code not in DIAGNOSTIC_ENVELOPE_CODES[envelope]
+            or (
+                envelope is not None
+                and (
+                    source != "api-gateway"
+                    or row["phase"] != "dapr-route"
+                    or row.get("kind") != "status"
+                    or type(row.get("httpStatus")) is not int
+                    or not 500 <= row["httpStatus"] <= 599
+                )
+            )
+        ):
+            raise ValueError("dependency diagnostic has invalid envelope evidence")
         safe_frames = diagnostic_source_frames(row.get("frames", []))
         records.append(
             {
@@ -1230,6 +1264,14 @@ def dependency_failure_records(
                         "grpcStatus",
                     )
                 },
+                **(
+                    {
+                        "responseEnvelope": envelope,
+                        "upstreamErrorCode": upstream_code,
+                    }
+                    if source == "api-gateway"
+                    else {}
+                ),
                 **(
                     {
                         "reason": row["reason"],
