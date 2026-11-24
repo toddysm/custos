@@ -20,6 +20,7 @@ import hashlib
 import json
 import os
 import re
+import subprocess
 import time
 import urllib.error
 import urllib.request
@@ -1058,7 +1059,8 @@ def collect_failure_diagnostics(
 ) -> None:
     """Retain safe all-phase failure evidence, including known nonterminal candidates.
 
-    Collection errors are explicit. The selected owned Job provides candidate
+    Collection errors, including command timeouts, retain only safe type metadata.
+    The selected owned Job provides candidate
     correlation; candidate identity alone is not terminal or successful proof.
     """
     import runtime as smoke
@@ -1109,7 +1111,14 @@ def collect_failure_diagnostics(
         retain_candidate({"sha": sha, "runId": run_id}, terminal=False)
     try:
         report["publicStartRejections"] = public_start_diagnostics()
-    except (RuntimeError, TypeError, ValueError, KeyError, OSError) as exc:
+    except (
+        RuntimeError,
+        TypeError,
+        ValueError,
+        KeyError,
+        OSError,
+        subprocess.TimeoutExpired,
+    ) as exc:
         report["collectionErrors"].append(
             {"source": "public-start", "errorType": type(exc).__name__}
         )
@@ -1155,7 +1164,14 @@ def collect_failure_diagnostics(
                         json.loads(line.removeprefix(prefix)),
                         terminal=prefix == DIAGNOSTIC_PREFIX,
                     )
-    except (RuntimeError, TypeError, ValueError, KeyError, OSError) as exc:
+    except (
+        RuntimeError,
+        TypeError,
+        ValueError,
+        KeyError,
+        OSError,
+        subprocess.TimeoutExpired,
+    ) as exc:
         report["collectionErrors"].append(
             {"source": "client-job", "errorType": type(exc).__name__}
         )
@@ -1193,7 +1209,14 @@ def collect_failure_diagnostics(
                         source,
                     )
                 )
-        except (RuntimeError, TypeError, ValueError, KeyError, OSError) as exc:
+        except (
+            RuntimeError,
+            TypeError,
+            ValueError,
+            KeyError,
+            OSError,
+            subprocess.TimeoutExpired,
+        ) as exc:
             report["collectionErrors"].append(
                 {"source": source, "errorType": type(exc).__name__}
             )
@@ -1202,7 +1225,14 @@ def collect_failure_diagnostics(
             record["runtime"] = service_probe(
                 "workflow-service", "diagnose", record["runId"], sha
             )
-        except (RuntimeError, TypeError, ValueError, KeyError, OSError) as exc:
+        except (
+            RuntimeError,
+            TypeError,
+            ValueError,
+            KeyError,
+            OSError,
+            subprocess.TimeoutExpired,
+        ) as exc:
             report["collectionErrors"].append(
                 {"source": "runtime-state", "errorType": type(exc).__name__}
             )
@@ -1556,7 +1586,7 @@ def verify_controlled_failure_diagnostics(
 
 
 def run(output: Path, values: Path, *, controlled_failure: bool = False) -> None:
-    """Require ordinary effects or explicit controlled-failure evidence; preserve proof errors."""
+    """Require lifecycle or controlled evidence; retain proof errors even if collection times out."""
     import runtime as smoke
 
     namespace, sha = os.environ["NS"], os.environ["GITHUB_SHA"]
@@ -1716,7 +1746,14 @@ def run(output: Path, values: Path, *, controlled_failure: bool = False) -> None
             raise ValueError("public proof did not confirm terminal cancellation")
         report["publicCancellationReadback"] = True
         output.write_text(json.dumps(report, indent=2))
-    except (RuntimeError, TypeError, ValueError, KeyError, OSError):
+    except (
+        RuntimeError,
+        TypeError,
+        ValueError,
+        KeyError,
+        OSError,
+        subprocess.TimeoutExpired,
+    ):
         try:
             collect_failure_diagnostics(
                 output,
@@ -1725,7 +1762,14 @@ def run(output: Path, values: Path, *, controlled_failure: bool = False) -> None
                 phase=phase,
                 job_name=job_name,
             )
-        except (RuntimeError, TypeError, ValueError, KeyError, OSError) as exc:
+        except (
+            RuntimeError,
+            TypeError,
+            ValueError,
+            KeyError,
+            OSError,
+            subprocess.TimeoutExpired,
+        ) as exc:
             print(
                 json.dumps(
                     {

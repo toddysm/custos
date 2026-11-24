@@ -1,4 +1,4 @@
-"""Regress the smoke-only runtime activation and pre-admission identity bootstrap."""
+"""Regress smoke runtime activation, public admission and controlled failure evidence."""
 
 import asyncio
 import io
@@ -1414,8 +1414,20 @@ def test_live_wait_snapshot_requires_registered_exact_ttl_and_preserves_pin(
         assert closed.await_count == 2
 
 
+@pytest.mark.parametrize(
+    "collector_error",
+    [
+        RuntimeError("private-collector"),
+        subprocess.TimeoutExpired(
+            ["private-command"], 30, output=b"private-output", stderr=b"private-stderr"
+        ),
+    ],
+)
 def test_collector_failure_does_not_replace_original_proof_error(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    collector_error: RuntimeError | subprocess.TimeoutExpired,
 ) -> None:
     """Explicit collector failure still propagates the original proof exception and never success."""
     monkeypatch.setenv("NS", "custos-system")
@@ -1429,18 +1441,125 @@ def test_collector_failure_does_not_replace_original_proof_error(
     monkeypatch.setitem(
         public.run.__globals__,
         "collect_failure_diagnostics",
-        Mock(side_effect=RuntimeError("private-collector")),
+        Mock(side_effect=collector_error),
     )
     with pytest.raises(ValueError) as raised:
         public.run(tmp_path / "evidence.json", tmp_path / "values.yaml")
     assert str(raised.value) == "private-proof"
     report = json.loads(capsys.readouterr().out)
     assert report["collectionErrors"] == [
-        {"source": "collector", "errorType": "RuntimeError"}
+        {"source": "collector", "errorType": type(collector_error).__name__}
     ]
     assert report["lifecycleProofFailed"] is True
     assert "private" not in json.dumps(report)
     assert not (tmp_path / "evidence.json").exists()
+
+
+def test_controlled_probe_timeout_collects_evidence_and_preserves_original_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A timed-out controlled exec still collects its candidate before propagating the timeout."""
+    monkeypatch.setenv("NS", "custos-system")
+    monkeypatch.setenv("GITHUB_SHA", TAG)
+    monkeypatch.setenv("IMAGE_PREFIX", "localhost:5001/custos")
+    run_id = "00000000-0000-5000-8000-000000000000"
+    initial = {
+        "sha": TAG,
+        "runId": "completed-pure-workflow",
+        "cancellationRunId": run_id,
+        "publicWorkflowCompleted": True,
+        "publicReadbackVerified": True,
+        "fullReceiverCertification": False,
+    }
+    monkeypatch.setitem(
+        public.run.__globals__,
+        "rendered",
+        Mock(return_value=[{"kind": "Pod", "metadata": {"name": "custos-smoke-test"}}]),
+    )
+    monkeypatch.setitem(public.run.__globals__, "client_job", Mock(return_value={}))
+    monkeypatch.setitem(public.run.__globals__, "wait_job", Mock())
+    monkeypatch.setitem(
+        sys.modules,
+        "runtime",
+        SimpleNamespace(
+            command=Mock(return_value=public.REPORT_PREFIX + json.dumps(initial))
+        ),
+    )
+    timeout = subprocess.TimeoutExpired(
+        ["private-command"], 30, output=b"private-output"
+    )
+    probe = Mock(
+        side_effect=[{"liveWaitVerified": True, "acceptedInputHash": "a" * 64}, timeout]
+    )
+    collector = Mock()
+    monkeypatch.setitem(public.run.__globals__, "service_probe", probe)
+    monkeypatch.setitem(
+        public.run.__globals__, "collect_failure_diagnostics", collector
+    )
+    output = tmp_path / "controlled-failure-evidence.json"
+    with pytest.raises(subprocess.TimeoutExpired) as raised:
+        public.run(output, tmp_path / "values.yaml", controlled_failure=True)
+    assert raised.value is timeout
+    assert probe.call_args.args == ("workflow-service", "fail-wait", run_id, TAG)
+    collector.assert_called_once_with(
+        output,
+        TAG,
+        run_id=run_id,
+        phase="controlled-wait-failure",
+        job_name=public.RESOURCE + "-failure",
+    )
+    assert not output.exists()
+
+
+@pytest.mark.parametrize(
+    "source", ["public-start", "client-job", "api-gateway", "runtime-state"]
+)
+def test_diagnostic_command_timeout_retains_only_safe_error_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    source: str,
+) -> None:
+    """A collector timeout retains its source/type while omitting command, stdout and stderr."""
+    monkeypatch.setenv("NS", "custos-system")
+    timeout = subprocess.TimeoutExpired(
+        ["private-command"], 30, output=b"private-output", stderr=b"private-stderr"
+    )
+    monkeypatch.setitem(
+        public.collect_failure_diagnostics.__globals__,
+        "public_start_diagnostics",
+        Mock(side_effect=timeout)
+        if source == "public-start"
+        else Mock(return_value=[]),
+    )
+    monkeypatch.setitem(
+        public.collect_failure_diagnostics.__globals__,
+        "service_probe",
+        Mock(side_effect=timeout)
+        if source == "runtime-state"
+        else Mock(return_value={}),
+    )
+    commands = (
+        [timeout, "", "", "", "", "", ""]
+        if source == "client-job"
+        else ["", timeout, "", "", "", "", ""]
+        if source == "api-gateway"
+        else [""] * 7
+    )
+    monkeypatch.setitem(
+        sys.modules, "runtime", SimpleNamespace(command=Mock(side_effect=commands))
+    )
+    public.collect_failure_diagnostics(
+        tmp_path / "evidence.json", TAG, run_id="00000000-0000-5000-8000-000000000000"
+    )
+    text = (tmp_path / "public-workflow-diagnostics.json").read_text()
+    report = json.loads(text)
+    assert report["collectionErrors"] == [
+        {"source": source, "errorType": "TimeoutExpired"}
+    ]
+    assert report["lifecycleProofFailed"] is True
+    assert "private" not in text
+    assert "private" not in capsys.readouterr().out
 
 
 @pytest.mark.parametrize(

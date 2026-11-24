@@ -52,6 +52,9 @@ protocol envelope through the real Workflow SDK inside its Ready container.
 It requires a failed-step outcome, correlated causal source diagnostics, unchanged
 accepted input and removed mirror. Synthetic private-data markers must not appear
 in the retained diagnostics, and collector errors fail the proof. The controlled
+collector records command timeouts using only safe source/type metadata; the
+original proof error remains fatal even if diagnostic collection also times out.
+The controlled
 report is not ordinary lifecycle success: the SDK can report `completed` for an
 orchestrator returning a failed step, which the current public projection maps
 to `succeeded`. Both observations are retained explicitly. This controlled fault
