@@ -128,15 +128,26 @@ opening RPC channels. This is local causal evidence, not deployed certification.
 The [deployment smoke workflow](../../.github/workflows/deploy-smoke.yml)
 uploads existing safe reports as `runtime-smoke-evidence` before owned cleanup,
 including on failure. Download the artifact from the **exact run and attempt**,
-not an unrelated green run. Use a new directory owned by this investigation:
+not an unrelated green run:
 
-```bash
-gh run download "$RUN_ID" --repo toddysm/custos \
-  --name runtime-smoke-evidence --dir "$EVIDENCE_DIR"
-```
+1. Open the approved Actions run and select the approved attempt. Confirm its
+   tested source and inspect that attempt's evidence-upload job log.
+2. Record the `runtime-smoke-evidence` artifact ID and download link emitted by
+   that upload. Follow that exact artifact's link, saving and extracting it into
+   a new directory owned by this investigation.
+3. If the upload did not produce an artifact ID/link, or that artifact has expired
+   or been deleted, stop and record the missing evidence. Do not substitute an
+   earlier attempt's artifact with the same name.
+4. Compare the downloaded reports' tested source and hashes with the retained
+   checkpoint, and retain the run ID, attempt and artifact ID together.
 
-Set `RUN_ID` to the approved run and `EVIDENCE_DIR` to that directory before
-running the command. Preserve artifact identity, report hashes and tested source
+[`gh run download`](https://cli.github.com/manual/gh_run_download) selects a run
+and artifact name, not an attempt. Reruns share the run ID, so name-based download
+cannot establish which attempt uploaded the evidence. Artifact metadata includes
+the run ID and source SHA but no attempt number; the approved attempt's upload
+log supplies that association.
+
+Preserve artifact identity, report hashes and tested source
 before the artifact expires under the repository's Actions retention policy.
 The upload step warns if no files exist; an upload warning or missing file is
 not successful verification.

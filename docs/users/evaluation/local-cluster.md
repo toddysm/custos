@@ -67,7 +67,17 @@ orchestrator returning a failed step, which the current public projection maps
 to `succeeded`. Both observations are retained explicitly. This controlled fault
 does not establish the cause of any earlier public 503 or certify receivers.
 
-### Inspect smoke evidence before recovery
+For a managed/remote cluster, follow
+[Install — connected](install-connected.md) instead; this page is the local
+variant of the same flow.
+
+> **M1 evaluation build.** No Web UI, operator-bootstrapped service tokens, and
+> single-replica infrastructure. After verification, run the
+> [first-admin ceremony](../../operations/bootstrap-admin.md).
+
+> **Prefer to script it?** [`custosctl`](../../developers/custosctl.md) is the developer CLI that automates most of this flow — `custosctl up` creates the `kind` cluster, installs the prereqs, and runs `helm install` (steps 2–3 and 5–6; you still build/load the images in step 4 yourself), and `custosctl e2e` also seeds the OOTB catalog and runs a sample workflow. This page is the readable walkthrough of what the CLI does under the hood.
+
+## Inspect smoke evidence before recovery
 
 The hosted workflow uploads safe reports under `runtime-smoke-evidence` before
 removing its owned registry and kind cluster. Use the
@@ -90,16 +100,6 @@ smoke, change rollout defaults, or infer a historical 503 cause from a later
 success. Follow the approved run cap and
 [safe recovery gate](../../developers/workflow-resume-subscriptions.md#controlled-failure-and-safe-recovery);
 receiver certification and unresolved repair acceptance remain separate.
-
-For a managed/remote cluster, follow
-[Install — connected](install-connected.md) instead; this page is the local
-variant of the same flow.
-
-> **M1 evaluation build.** No Web UI, operator-bootstrapped service tokens, and
-> single-replica infrastructure. After verification, run the
-> [first-admin ceremony](../../operations/bootstrap-admin.md).
-
-> **Prefer to script it?** [`custosctl`](../../developers/custosctl.md) is the developer CLI that automates most of this flow — `custosctl up` creates the `kind` cluster, installs the prereqs, and runs `helm install` (steps 2–3 and 5–6; you still build/load the images in step 4 yourself), and `custosctl e2e` also seeds the OOTB catalog and runs a sample workflow. This page is the readable walkthrough of what the CLI does under the hood.
 
 ## 1. Prerequisites
 
