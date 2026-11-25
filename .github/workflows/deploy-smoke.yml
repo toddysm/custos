@@ -290,6 +290,12 @@ jobs:
             --values "$RUNNER_TEMP/runtime-values.yaml" \
             --output "$RUNNER_TEMP/public-workflow-evidence.json"
 
+      - name: Verify controlled durable-wait failure diagnostics
+        run: |
+          python tests/helm/smoke/public_workflow.py run --controlled-failure \
+            --values "$RUNNER_TEMP/runtime-values.yaml" \
+            --output "$RUNNER_TEMP/controlled-failure-evidence.json"
+
       - name: Upload safe runtime readiness evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -300,6 +306,8 @@ jobs:
             ${{ runner.temp }}/runtime-readiness-diagnostics.json
             ${{ runner.temp }}/public-workflow-evidence.json
             ${{ runner.temp }}/public-workflow-diagnostics.json
+            ${{ runner.temp }}/controlled-failure-evidence.json
+            ${{ runner.temp }}/controlled-failure-diagnostics.json
           if-no-files-found: warn
 
       - name: Diagnostics on failure

@@ -1,4 +1,4 @@
-"""Regress the smoke-only runtime activation and pre-admission identity bootstrap."""
+"""Regress smoke runtime activation, public admission and controlled failure evidence."""
 
 import asyncio
 import io
@@ -1126,7 +1126,9 @@ def test_failed_public_job_reports_only_payload_free_rejection_locations(
         "rendered",
         lambda _: [{"kind": "Pod", "metadata": {"name": "custos-smoke-test"}}],
     )
-    monkeypatch.setitem(public.run.__globals__, "client_job", lambda *args: {})
+    monkeypatch.setitem(
+        public.run.__globals__, "client_job", lambda *args, **kwargs: {}
+    )
 
     def wait(job: dict[str, Any]) -> None:
         """Fail at the same orchestration boundary as an unsuccessful initial public Job."""
@@ -1402,10 +1404,30 @@ def test_live_wait_snapshot_requires_registered_exact_ttl_and_preserves_pin(
             asyncio.run(public.accepted_wait_snapshot(run_id, require_live_mirror=True))
     opened.assert_awaited_once()
     closed.assert_awaited_once()
+    if ttl_seconds == 300:
+        with pytest.raises(RuntimeError, match="left its durable wait mirror"):
+            asyncio.run(
+                public.accepted_wait_snapshot(
+                    run_id, require_live_mirror=False, require_no_mirror=True
+                )
+            )
+        assert closed.await_count == 2
 
 
+@pytest.mark.parametrize(
+    "collector_error",
+    [
+        RuntimeError("private-collector"),
+        subprocess.TimeoutExpired(
+            ["private-command"], 30, output=b"private-output", stderr=b"private-stderr"
+        ),
+    ],
+)
 def test_collector_failure_does_not_replace_original_proof_error(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    collector_error: RuntimeError | subprocess.TimeoutExpired,
 ) -> None:
     """Explicit collector failure still propagates the original proof exception and never success."""
     monkeypatch.setenv("NS", "custos-system")
@@ -1419,18 +1441,276 @@ def test_collector_failure_does_not_replace_original_proof_error(
     monkeypatch.setitem(
         public.run.__globals__,
         "collect_failure_diagnostics",
-        Mock(side_effect=RuntimeError("private-collector")),
+        Mock(side_effect=collector_error),
     )
     with pytest.raises(ValueError) as raised:
         public.run(tmp_path / "evidence.json", tmp_path / "values.yaml")
     assert str(raised.value) == "private-proof"
     report = json.loads(capsys.readouterr().out)
     assert report["collectionErrors"] == [
-        {"source": "collector", "errorType": "RuntimeError"}
+        {"source": "collector", "errorType": type(collector_error).__name__}
     ]
     assert report["lifecycleProofFailed"] is True
     assert "private" not in json.dumps(report)
     assert not (tmp_path / "evidence.json").exists()
+
+
+def test_controlled_probe_timeout_collects_evidence_and_preserves_original_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A timed-out controlled exec still collects its candidate before propagating the timeout."""
+    monkeypatch.setenv("NS", "custos-system")
+    monkeypatch.setenv("GITHUB_SHA", TAG)
+    monkeypatch.setenv("IMAGE_PREFIX", "localhost:5001/custos")
+    run_id = "00000000-0000-5000-8000-000000000000"
+    initial = {
+        "sha": TAG,
+        "runId": "completed-pure-workflow",
+        "cancellationRunId": run_id,
+        "publicWorkflowCompleted": True,
+        "publicReadbackVerified": True,
+        "fullReceiverCertification": False,
+    }
+    monkeypatch.setitem(
+        public.run.__globals__,
+        "rendered",
+        Mock(return_value=[{"kind": "Pod", "metadata": {"name": "custos-smoke-test"}}]),
+    )
+    monkeypatch.setitem(public.run.__globals__, "client_job", Mock(return_value={}))
+    monkeypatch.setitem(public.run.__globals__, "wait_job", Mock())
+    monkeypatch.setitem(
+        sys.modules,
+        "runtime",
+        SimpleNamespace(
+            command=Mock(return_value=public.REPORT_PREFIX + json.dumps(initial))
+        ),
+    )
+    timeout = subprocess.TimeoutExpired(
+        ["private-command"], 30, output=b"private-output"
+    )
+    probe = Mock(
+        side_effect=[{"liveWaitVerified": True, "acceptedInputHash": "a" * 64}, timeout]
+    )
+    collector = Mock()
+    monkeypatch.setitem(public.run.__globals__, "service_probe", probe)
+    monkeypatch.setitem(
+        public.run.__globals__, "collect_failure_diagnostics", collector
+    )
+    output = tmp_path / "controlled-failure-evidence.json"
+    with pytest.raises(subprocess.TimeoutExpired) as raised:
+        public.run(output, tmp_path / "values.yaml", controlled_failure=True)
+    assert raised.value is timeout
+    assert probe.call_args.args == ("workflow-service", "fail-wait", run_id, TAG)
+    collector.assert_called_once_with(
+        output,
+        TAG,
+        run_id=run_id,
+        phase="controlled-wait-failure",
+        job_name=public.RESOURCE + "-failure",
+        filename="controlled-failure-diagnostics.json",
+    )
+    assert not output.exists()
+
+
+@pytest.mark.parametrize("marker", public.FAILURE_MARKERS)
+@pytest.mark.parametrize("field", ["file", "function", "stepId", "phase"])
+def test_collector_rejects_schema_valid_markers_before_any_output(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    marker: str,
+    field: str,
+) -> None:
+    """Even schema-valid private markers are replaced before artifact or log publication."""
+    monkeypatch.setenv("NS", "custos-system")
+    run_id = "00000000-0000-5000-8000-000000000000"
+    frame = {"file": "durable.py", "function": "drive_durable_resume", "line": 502}
+    record: dict[str, Any] = {
+        "runId": run_id,
+        "stepId": marker if field == "stepId" else "await-cancellation",
+        "operation": "wait",
+        "phase": "driver",
+        "errorType": "ValueError",
+        "frames": [frame],
+    }
+    if field in {"file", "function"}:
+        frame[field] = marker + ".py" if field == "file" else marker
+
+    def command(args: list[str]) -> str:
+        """Expose the marker only in an owned Workflow-container structured failure."""
+        if (
+            "deployment/custos-workflow-service" in args
+            and args[args.index("-c") + 1] == "workflow-service"
+        ):
+            return "WORKFLOW_RESUME_FAILURE " + json.dumps(record)
+        return ""
+
+    monkeypatch.setitem(sys.modules, "runtime", SimpleNamespace(command=command))
+    monkeypatch.setitem(
+        public.collect_failure_diagnostics.__globals__,
+        "public_start_diagnostics",
+        Mock(return_value=[]),
+    )
+    monkeypatch.setitem(
+        public.collect_failure_diagnostics.__globals__,
+        "service_probe",
+        Mock(return_value={}),
+    )
+    writes: list[str] = []
+    original_write = Path.write_text
+
+    def write_text(
+        path: Path,
+        data: str,
+        encoding: str | None = None,
+        errors: str | None = None,
+        newline: str | None = None,
+    ) -> int:
+        """Reject private markers at every write, not only in the final artifact."""
+        assert all(value not in data for value in public.FAILURE_MARKERS)
+        writes.append(data)
+        return original_write(
+            path, data, encoding=encoding, errors=errors, newline=newline
+        )
+
+    monkeypatch.setattr(Path, "write_text", write_text)
+    public.collect_failure_diagnostics(
+        tmp_path / "evidence.json",
+        TAG,
+        run_id=run_id,
+        phase=marker if field == "phase" else "controlled-wait-failure",
+        filename="controlled-failure-diagnostics.json",
+    )
+    text = (tmp_path / "controlled-failure-diagnostics.json").read_text()
+    assert not (tmp_path / "public-workflow-diagnostics.json").exists()
+    logged = capsys.readouterr().out
+    report = json.loads(text)
+    assert report["collectionErrors"] == [
+        {"source": "privacy", "errorType": "ValueError"}
+    ]
+    assert report["diagnosticOnly"] is True and report["lifecycleProofFailed"] is True
+    assert writes == [text]
+    assert all(
+        value not in text and value not in logged for value in public.FAILURE_MARKERS
+    )
+    with pytest.raises(ValueError):
+        public.verify_controlled_failure_diagnostics(report, run_id, TAG)
+
+
+def test_collector_rejects_private_source_identity_without_echoing_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Invalid source identity cannot be reflected in the privacy-rejection report."""
+    monkeypatch.setenv("NS", "custos-system")
+    command = Mock()
+    monkeypatch.setitem(sys.modules, "runtime", SimpleNamespace(command=command))
+    with pytest.raises(ValueError, match="exact tested commit"):
+        public.collect_failure_diagnostics(
+            tmp_path / "evidence.json", public.FAILURE_MARKERS[0]
+        )
+    assert not (tmp_path / "public-workflow-diagnostics.json").exists()
+    assert capsys.readouterr().out == ""
+    command.assert_not_called()
+
+
+def test_cli_timeout_excludes_injected_command_and_private_streams(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The actual CLI exits nonzero without exposing an exec-shaped timeout's source or streams."""
+    script = ROOT / "tests/helm/smoke/public_workflow.py"
+    timeout = subprocess.TimeoutExpired(
+        ["kubectl", "exec", "proof-pod", "--", "python", "-c", script.read_text()],
+        150,
+        output=public.FAILURE_MARKERS[0].encode(),
+        stderr=public.FAILURE_MARKERS[1].encode(),
+    )
+    monkeypatch.setitem(
+        sys.modules, "runtime", SimpleNamespace(command=Mock(side_effect=timeout))
+    )
+    for key, value in (
+        ("NS", "custos-system"),
+        ("GITHUB_SHA", TAG),
+        ("CHART", "unused-chart"),
+        ("VALUES", "unused-values"),
+    ):
+        monkeypatch.setenv(key, value)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            str(script),
+            "run",
+            "--controlled-failure",
+            "--values",
+            str(tmp_path / "values.yaml"),
+            "--output",
+            str(tmp_path / "evidence.json"),
+        ],
+    )
+    with pytest.raises(SystemExit) as raised:
+        runpy.run_path(str(script), run_name="__main__")
+    assert raised.value.code == 1
+    captured = capsys.readouterr()
+    assert json.loads(captured.err) == {"source": "cli", "errorType": "TimeoutExpired"}
+    text = (tmp_path / "controlled-failure-diagnostics.json").read_text()
+    assert not (tmp_path / "public-workflow-diagnostics.json").exists()
+    assert all(
+        marker not in captured.out + captured.err + text
+        for marker in public.FAILURE_MARKERS
+    )
+    assert "Traceback" not in captured.err
+    assert not (tmp_path / "evidence.json").exists()
+
+
+@pytest.mark.parametrize(
+    "source", ["public-start", "client-job", "api-gateway", "runtime-state"]
+)
+def test_diagnostic_command_timeout_retains_only_safe_error_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    source: str,
+) -> None:
+    """A collector timeout retains its source/type while omitting command, stdout and stderr."""
+    monkeypatch.setenv("NS", "custos-system")
+    timeout = subprocess.TimeoutExpired(
+        ["private-command"], 30, output=b"private-output", stderr=b"private-stderr"
+    )
+    monkeypatch.setitem(
+        public.collect_failure_diagnostics.__globals__,
+        "public_start_diagnostics",
+        Mock(side_effect=timeout)
+        if source == "public-start"
+        else Mock(return_value=[]),
+    )
+    monkeypatch.setitem(
+        public.collect_failure_diagnostics.__globals__,
+        "service_probe",
+        Mock(side_effect=timeout)
+        if source == "runtime-state"
+        else Mock(return_value={}),
+    )
+    commands = (
+        [timeout, "", "", "", "", "", ""]
+        if source == "client-job"
+        else ["", timeout, "", "", "", "", ""]
+        if source == "api-gateway"
+        else [""] * 7
+    )
+    monkeypatch.setitem(
+        sys.modules, "runtime", SimpleNamespace(command=Mock(side_effect=commands))
+    )
+    public.collect_failure_diagnostics(
+        tmp_path / "evidence.json", TAG, run_id="00000000-0000-5000-8000-000000000000"
+    )
+    text = (tmp_path / "public-workflow-diagnostics.json").read_text()
+    report = json.loads(text)
+    assert report["collectionErrors"] == [
+        {"source": source, "errorType": "TimeoutExpired"}
+    ]
+    assert report["lifecycleProofFailed"] is True
+    assert "private" not in text
+    assert "private" not in capsys.readouterr().out
 
 
 @pytest.mark.parametrize(
@@ -1920,3 +2200,227 @@ def test_private_proof_executes_only_in_an_actual_ready_tested_container(
         == "root"
     )
     assert len(executed) == 1
+
+
+@pytest.mark.parametrize("outcome_status", ["failed", "succeeded"])
+def test_controlled_event_uses_real_sdk_contract_and_requires_failed_step(
+    outcome_status: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SDK completion alone cannot pass the fault proof; require domain failure and removed mirror."""
+    from custos_spl.interfaces.delivery import resume_channel
+    from custos_workflow.runtime import dapr
+    from custos_workflow.runtime._common import RunStatus
+
+    run_id = "00000000-0000-5000-8000-000000000000"
+    client = AsyncMock(spec=dapr.WorkflowClient)
+    client.get_workflow_state.return_value = SimpleNamespace(
+        status=RunStatus.COMPLETED,
+        serialized_output=json.dumps(
+            {
+                "status": outcome_status,
+                "outputs": {},
+                "failed_step": "await-cancellation",
+                "failure_envelope": {"kind": "step.resume_delivery_failed"},
+            }
+        ),
+    )
+    monkeypatch.setattr(dapr, "WorkflowClient", Mock(return_value=client))
+    snapshot = AsyncMock(return_value="a" * 64)
+    monkeypatch.setitem(
+        public.controlled_wait_failure.__globals__, "accepted_wait_snapshot", snapshot
+    )
+    if outcome_status == "failed":
+        report = asyncio.run(public.controlled_wait_failure(run_id, TAG))
+        assert report["runtimeStatus"] == "completed"
+        assert report["stepOutcome"] == "failed"
+        assert report["mirrorCleanupVerified"] is True
+        assert not any(
+            marker in json.dumps(report) for marker in public.FAILURE_MARKERS
+        )
+        assert snapshot.await_args_list[-1].kwargs == {
+            "require_live_mirror": False,
+            "require_no_mirror": True,
+        }
+    else:
+        with pytest.raises(ValueError, match="intended wait step"):
+            asyncio.run(public.controlled_wait_failure(run_id, TAG))
+        assert snapshot.await_count == 1
+    client.raise_workflow_event.assert_awaited_once()
+    event = client.raise_workflow_event.await_args.args[0]
+    assert event.instance_id == run_id
+    assert event.event_name == resume_channel(
+        public.WORKSPACE, run_id, "await-cancellation", "never-sent"
+    )
+    assert event.data["deliveryProtocol"] == 1
+    assert all(marker in json.dumps(event.data) for marker in public.FAILURE_MARKERS)
+    client.aclose.assert_awaited_once()
+
+
+@pytest.mark.parametrize(
+    "fault",
+    [
+        "none",
+        "uncorrelated",
+        "missing-frame",
+        "collector-error",
+        "private-marker",
+        "stale",
+    ],
+)
+def test_controlled_failure_requires_complete_safe_causal_evidence(fault: str) -> None:
+    """Missing correlation, source frames, privacy or collection integrity cannot look successful."""
+    run_id = "00000000-0000-5000-8000-000000000000"
+    record = {
+        "runId": run_id,
+        "stepId": "await-cancellation",
+        "operation": "wait",
+        "phase": "driver",
+        "errorType": "ValueError",
+        "frames": [{"file": "durable.py", "function": "drive", "line": 1}],
+    }
+    report: dict[str, Any] = {
+        "sha": TAG,
+        "diagnosticOnly": True,
+        "lifecycleProofFailed": True,
+        "failedPhase": "controlled-wait-failure",
+        "causalFailures": [record],
+        "collectionErrors": [],
+    }
+    if fault == "uncorrelated":
+        record["runId"] = "different-run"
+    elif fault == "missing-frame":
+        record["frames"] = []
+    elif fault == "collector-error":
+        report["collectionErrors"] = [
+            {"source": "workflow-service", "errorType": "OSError"}
+        ]
+    elif fault == "private-marker":
+        report["serviceLogs"] = {"unexpected": public.FAILURE_MARKERS[0]}
+    elif fault == "stale":
+        report["sha"] = "b" * 40
+    if fault == "none":
+        public.verify_controlled_failure_diagnostics(report, run_id, TAG)
+    else:
+        with pytest.raises(ValueError):
+            public.verify_controlled_failure_diagnostics(report, run_id, TAG)
+
+
+def test_controlled_proof_keeps_public_projection_separate_and_uses_distinct_jobs(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Controlled output and diagnostics stay distinct from public status and lifecycle failures."""
+    monkeypatch.setenv("NS", "custos-system")
+    monkeypatch.setenv("GITHUB_SHA", TAG)
+    monkeypatch.setenv("IMAGE_PREFIX", "localhost:5001/custos")
+    run_id = "00000000-0000-5000-8000-000000000000"
+    initial = {
+        "sha": TAG,
+        "runId": "completed-pure-workflow",
+        "cancellationRunId": run_id,
+        "publicWorkflowCompleted": True,
+        "publicReadbackVerified": True,
+        "fullReceiverCertification": False,
+    }
+    readback = {
+        "sha": TAG,
+        "runId": run_id,
+        "publicFailureReadbackObserved": True,
+        "publicStatus": "succeeded",
+    }
+    monkeypatch.setitem(
+        public.run.__globals__,
+        "rendered",
+        lambda _: [
+            {
+                "kind": "Pod",
+                "metadata": {"name": "custos-smoke-test", "labels": {}},
+                "spec": {},
+            }
+        ],
+    )
+    jobs: list[dict[str, Any]] = []
+    monkeypatch.setitem(public.run.__globals__, "wait_job", jobs.append)
+
+    def command(args: list[str]) -> str:
+        """Return only the selected owned Job's source-bound public report."""
+        resource = args[-1]
+        assert resource in {
+            "job/" + public.RESOURCE + "-failure",
+            "job/" + public.RESOURCE + "-failure-readback",
+        }
+        return f"{public.REPORT_PREFIX}{json.dumps(readback if resource.endswith('-readback') else initial)}"
+
+    def probe(service: str, phase: str, candidate: str, sha: str) -> dict[str, Any]:
+        """Model the separate registered-wait and actual failed-step observations."""
+        assert service == "workflow-service" and candidate == run_id and sha == TAG
+        if phase == "runtime-wait":
+            return {"liveWaitVerified": True, "acceptedInputHash": "a" * 64}
+        assert phase == "fail-wait"
+        return {
+            "sha": TAG,
+            "runId": run_id,
+            "controlledWaitFailureVerified": True,
+            "mirrorCleanupVerified": True,
+            "acceptedInputHash": "a" * 64,
+            "runtimeStatus": "completed",
+            "stepOutcome": "failed",
+            "failedStep": "await-cancellation",
+            "failureKind": "step.resume_delivery_failed",
+        }
+
+    def collect(output: Path, sha: str, **kwargs: Any) -> None:
+        """Persist failure-only evidence from the selected failure Job, never ordinary lifecycle logs."""
+        assert kwargs == {
+            "run_id": run_id,
+            "phase": "controlled-wait-failure",
+            "job_name": public.RESOURCE + "-failure",
+            "filename": "controlled-failure-diagnostics.json",
+        }
+        output.with_name(kwargs["filename"]).write_text(
+            json.dumps(
+                {
+                    "sha": sha,
+                    "diagnosticOnly": True,
+                    "lifecycleProofFailed": True,
+                    "failedPhase": "controlled-wait-failure",
+                    "collectionErrors": [],
+                    "causalFailures": [
+                        {
+                            "runId": run_id,
+                            "stepId": "await-cancellation",
+                            "operation": "wait",
+                            "phase": "driver",
+                            "errorType": "ValueError",
+                            "frames": [
+                                {"file": "durable.py", "line": 1, "function": "drive"}
+                            ],
+                        }
+                    ],
+                }
+            )
+        )
+
+    monkeypatch.setitem(sys.modules, "runtime", SimpleNamespace(command=command))
+    monkeypatch.setitem(public.run.__globals__, "service_probe", probe)
+    monkeypatch.setitem(public.run.__globals__, "collect_failure_diagnostics", collect)
+    output = tmp_path / "controlled-failure-evidence.json"
+    ordinary_diagnostics = tmp_path / "public-workflow-diagnostics.json"
+    ordinary_diagnostics.write_text('{"ordinaryFailure": true}')
+    public.run(output, tmp_path / "values.yaml", controlled_failure=True)
+    assert ordinary_diagnostics.read_text() == '{"ordinaryFailure": true}'
+    assert (tmp_path / "controlled-failure-diagnostics.json").exists()
+    report = json.loads(output.read_text())
+    assert report["controlledFailureVerification"] is True
+    assert report["stepOutcome"] == "failed" and report["publicStatus"] == "succeeded"
+    assert report["original503CauseEstablished"] is False
+    assert "privateCancellationVerified" not in report
+    assert "publicWorkflowCompleted" not in report
+    assert report["pureWorkflowRunId"] == initial["runId"]
+    assert [job["metadata"]["name"] for job in jobs] == [
+        public.RESOURCE + "-failure",
+        public.RESOURCE + "-failure-readback",
+    ]
+    assert (
+        jobs[0]["spec"]["template"]["spec"]["containers"][0]["command"][-1]
+        == "failure-client"
+    )

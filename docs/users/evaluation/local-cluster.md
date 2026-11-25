@@ -47,6 +47,25 @@ routes. Workflow's managed configuration sets `WF_GATEWAY_NAMESPACE` to the
 release namespace and uses signed contexts, never forged plain identity headers.
 With managed deny-all policies, the Helm test client receives only DNS and
 public Gateway access, not controller mesh, database or Kubernetes API access.
+The hosted gate separately starts another bounded wait and injects one invalid
+protocol envelope through the real Workflow SDK inside its Ready container.
+It requires a failed-step outcome, correlated causal source diagnostics, unchanged
+accepted input and removed mirror. Synthetic private-data markers must not appear
+in the retained diagnostics, and collector errors fail the proof. The controlled
+collector records command timeouts using only safe source/type metadata; the
+original proof error remains fatal even if diagnostic collection also times out.
+Marker-bearing diagnostics are replaced by safe failure metadata before any
+artifact or log output. CLI command timeouts exit nonzero with a safe error
+category, without printing the injected command or its captured streams.
+Controlled diagnostics are retained in `controlled-failure-diagnostics.json`,
+separate from ordinary lifecycle failures in `public-workflow-diagnostics.json`.
+The controlled diagnostic report's `lifecycleProofFailed: true` describes the
+deliberately failed run, not the ordinary lifecycle or the overall smoke result.
+Both diagnostic artifacts are uploaded when present. The controlled
+report is not ordinary lifecycle success: the SDK can report `completed` for an
+orchestrator returning a failed step, which the current public projection maps
+to `succeeded`. Both observations are retained explicitly. This controlled fault
+does not establish the cause of any earlier public 503 or certify receivers.
 For a managed/remote cluster, follow
 [Install — connected](install-connected.md) instead; this page is the local
 variant of the same flow.
