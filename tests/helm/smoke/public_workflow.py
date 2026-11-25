@@ -42,6 +42,14 @@ DIAGNOSTIC_PREFIX = "PUBLIC_WORKFLOW_TERMINAL "
 CANDIDATE_PREFIX = "PUBLIC_WORKFLOW_CANDIDATE "
 REQUEST_PREFIX = "PUBLIC_WORKFLOW_REQUEST "
 FAILURE_MARKERS = ("synthetic-credential-Error", "synthetic-payload-Exception")
+_PROOF_ERRORS: Final = (
+    RuntimeError,
+    TypeError,
+    ValueError,
+    KeyError,
+    OSError,
+    subprocess.TimeoutExpired,
+)
 DIAGNOSTIC_ERROR_TYPES = frozenset(
     {
         "WorkflowRuntimeUnavailableError",
@@ -1059,12 +1067,15 @@ def collect_failure_diagnostics(
     run_id: str | None = None,
     phase: str = "public-execution",
     job_name: str = RESOURCE,
+    filename: str = "public-workflow-diagnostics.json",
 ) -> None:
     """Retain safe all-phase failure evidence, including known nonterminal candidates.
 
     The source must be the exact tested commit. Collection errors, including
     command timeouts, retain only safe type metadata. Marker-bearing records are
     replaced by a privacy-failure report before either file or log output.
+    The filename selects a sibling artifact so controlled faults do not replace
+    ordinary lifecycle diagnostics.
     The selected owned Job provides candidate
     correlation; candidate identity alone is not terminal or successful proof.
     """
@@ -1118,14 +1129,7 @@ def collect_failure_diagnostics(
         retain_candidate({"sha": sha, "runId": run_id}, terminal=False)
     try:
         report["publicStartRejections"] = public_start_diagnostics()
-    except (
-        RuntimeError,
-        TypeError,
-        ValueError,
-        KeyError,
-        OSError,
-        subprocess.TimeoutExpired,
-    ) as exc:
+    except _PROOF_ERRORS as exc:
         report["collectionErrors"].append(
             {"source": "public-start", "errorType": type(exc).__name__}
         )
@@ -1171,14 +1175,7 @@ def collect_failure_diagnostics(
                         json.loads(line.removeprefix(prefix)),
                         terminal=prefix == DIAGNOSTIC_PREFIX,
                     )
-    except (
-        RuntimeError,
-        TypeError,
-        ValueError,
-        KeyError,
-        OSError,
-        subprocess.TimeoutExpired,
-    ) as exc:
+    except _PROOF_ERRORS as exc:
         report["collectionErrors"].append(
             {"source": "client-job", "errorType": type(exc).__name__}
         )
@@ -1216,14 +1213,7 @@ def collect_failure_diagnostics(
                         source,
                     )
                 )
-        except (
-            RuntimeError,
-            TypeError,
-            ValueError,
-            KeyError,
-            OSError,
-            subprocess.TimeoutExpired,
-        ) as exc:
+        except _PROOF_ERRORS as exc:
             report["collectionErrors"].append(
                 {"source": source, "errorType": type(exc).__name__}
             )
@@ -1232,14 +1222,7 @@ def collect_failure_diagnostics(
             record["runtime"] = service_probe(
                 "workflow-service", "diagnose", record["runId"], sha
             )
-        except (
-            RuntimeError,
-            TypeError,
-            ValueError,
-            KeyError,
-            OSError,
-            subprocess.TimeoutExpired,
-        ) as exc:
+        except _PROOF_ERRORS as exc:
             report["collectionErrors"].append(
                 {"source": "runtime-state", "errorType": type(exc).__name__}
             )
@@ -1257,7 +1240,7 @@ def collect_failure_diagnostics(
             "collectionErrors": [{"source": "privacy", "errorType": "ValueError"}],
         }
         serialized = json.dumps(report, indent=2)
-    output.with_name("public-workflow-diagnostics.json").write_text(serialized)
+    output.with_name(filename).write_text(serialized)
     print(json.dumps(report), flush=True)
 
 
@@ -1601,13 +1584,18 @@ def verify_controlled_failure_diagnostics(
 
 
 def run(output: Path, values: Path, *, controlled_failure: bool = False) -> None:
-    """Require lifecycle or controlled evidence; retain proof errors even if collection times out."""
+    """Keep lifecycle and controlled diagnostics separate, preserving original proof errors."""
     import runtime as smoke
 
     namespace, sha = os.environ["NS"], os.environ["GITHUB_SHA"]
     run_id = None
     phase = "public-execution"
     job_name = RESOURCE + ("-failure" if controlled_failure else "")
+    diagnostic_filename = (
+        "controlled-failure-diagnostics.json"
+        if controlled_failure
+        else "public-workflow-diagnostics.json"
+    )
     try:
         documents = rendered(values)
         public = next(
@@ -1652,11 +1640,14 @@ def run(output: Path, values: Path, *, controlled_failure: bool = False) -> None
                     "controlled wait failure did not retain its required effects"
                 )
             collect_failure_diagnostics(
-                output, sha, run_id=run_id, phase=phase, job_name=job_name
+                output,
+                sha,
+                run_id=run_id,
+                phase=phase,
+                job_name=job_name,
+                filename=diagnostic_filename,
             )
-            diagnostics = json.loads(
-                output.with_name("public-workflow-diagnostics.json").read_text()
-            )
+            diagnostics = json.loads(output.with_name(diagnostic_filename).read_text())
             verify_controlled_failure_diagnostics(diagnostics, run_id, sha)
             phase = "public-failure-readback"
             readback = client_job(
@@ -1761,14 +1752,7 @@ def run(output: Path, values: Path, *, controlled_failure: bool = False) -> None
             raise ValueError("public proof did not confirm terminal cancellation")
         report["publicCancellationReadback"] = True
         output.write_text(json.dumps(report, indent=2))
-    except (
-        RuntimeError,
-        TypeError,
-        ValueError,
-        KeyError,
-        OSError,
-        subprocess.TimeoutExpired,
-    ):
+    except _PROOF_ERRORS:
         try:
             collect_failure_diagnostics(
                 output,
@@ -1776,15 +1760,9 @@ def run(output: Path, values: Path, *, controlled_failure: bool = False) -> None
                 run_id=run_id,
                 phase=phase,
                 job_name=job_name,
+                filename=diagnostic_filename,
             )
-        except (
-            RuntimeError,
-            TypeError,
-            ValueError,
-            KeyError,
-            OSError,
-            subprocess.TimeoutExpired,
-        ) as exc:
+        except _PROOF_ERRORS as exc:
             print(
                 json.dumps(
                     {

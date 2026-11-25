@@ -1507,6 +1507,7 @@ def test_controlled_probe_timeout_collects_evidence_and_preserves_original_error
         run_id=run_id,
         phase="controlled-wait-failure",
         job_name=public.RESOURCE + "-failure",
+        filename="controlled-failure-diagnostics.json",
     )
     assert not output.exists()
 
@@ -1578,8 +1579,10 @@ def test_collector_rejects_schema_valid_markers_before_any_output(
         TAG,
         run_id=run_id,
         phase=marker if field == "phase" else "controlled-wait-failure",
+        filename="controlled-failure-diagnostics.json",
     )
-    text = (tmp_path / "public-workflow-diagnostics.json").read_text()
+    text = (tmp_path / "controlled-failure-diagnostics.json").read_text()
+    assert not (tmp_path / "public-workflow-diagnostics.json").exists()
     logged = capsys.readouterr().out
     report = json.loads(text)
     assert report["collectionErrors"] == [
@@ -1649,7 +1652,8 @@ def test_cli_timeout_excludes_injected_command_and_private_streams(
     assert raised.value.code == 1
     captured = capsys.readouterr()
     assert json.loads(captured.err) == {"source": "cli", "errorType": "TimeoutExpired"}
-    text = (tmp_path / "public-workflow-diagnostics.json").read_text()
+    text = (tmp_path / "controlled-failure-diagnostics.json").read_text()
+    assert not (tmp_path / "public-workflow-diagnostics.json").exists()
     assert all(
         marker not in captured.out + captured.err + text
         for marker in public.FAILURE_MARKERS
@@ -2304,7 +2308,7 @@ def test_controlled_failure_requires_complete_safe_causal_evidence(fault: str) -
 def test_controlled_proof_keeps_public_projection_separate_and_uses_distinct_jobs(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """A controlled proof reports failed output even when native public readback says succeeded."""
+    """Controlled output and diagnostics stay distinct from public status and lifecycle failures."""
     monkeypatch.setenv("NS", "custos-system")
     monkeypatch.setenv("GITHUB_SHA", TAG)
     monkeypatch.setenv("IMAGE_PREFIX", "localhost:5001/custos")
@@ -2370,8 +2374,9 @@ def test_controlled_proof_keeps_public_projection_separate_and_uses_distinct_job
             "run_id": run_id,
             "phase": "controlled-wait-failure",
             "job_name": public.RESOURCE + "-failure",
+            "filename": "controlled-failure-diagnostics.json",
         }
-        output.with_name("public-workflow-diagnostics.json").write_text(
+        output.with_name(kwargs["filename"]).write_text(
             json.dumps(
                 {
                     "sha": sha,
@@ -2399,7 +2404,11 @@ def test_controlled_proof_keeps_public_projection_separate_and_uses_distinct_job
     monkeypatch.setitem(public.run.__globals__, "service_probe", probe)
     monkeypatch.setitem(public.run.__globals__, "collect_failure_diagnostics", collect)
     output = tmp_path / "controlled-failure-evidence.json"
+    ordinary_diagnostics = tmp_path / "public-workflow-diagnostics.json"
+    ordinary_diagnostics.write_text('{"ordinaryFailure": true}')
     public.run(output, tmp_path / "values.yaml", controlled_failure=True)
+    assert ordinary_diagnostics.read_text() == '{"ordinaryFailure": true}'
+    assert (tmp_path / "controlled-failure-diagnostics.json").exists()
     report = json.loads(output.read_text())
     assert report["controlledFailureVerification"] is True
     assert report["stepOutcome"] == "failed" and report["publicStatus"] == "succeeded"

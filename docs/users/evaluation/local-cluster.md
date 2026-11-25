@@ -57,7 +57,11 @@ original proof error remains fatal even if diagnostic collection also times out.
 Marker-bearing diagnostics are replaced by safe failure metadata before any
 artifact or log output. CLI command timeouts exit nonzero with a safe error
 category, without printing the injected command or its captured streams.
-The controlled
+Controlled diagnostics are retained in `controlled-failure-diagnostics.json`,
+separate from ordinary lifecycle failures in `public-workflow-diagnostics.json`.
+The controlled diagnostic report's `lifecycleProofFailed: true` describes the
+deliberately failed run, not the ordinary lifecycle or the overall smoke result.
+Both diagnostic artifacts are uploaded when present. The controlled
 report is not ordinary lifecycle success: the SDK can report `completed` for an
 orchestrator returning a failed step, which the current public projection maps
 to `succeeded`. Both observations are retained explicitly. This controlled fault
