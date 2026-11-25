@@ -66,6 +66,31 @@ report is not ordinary lifecycle success: the SDK can report `completed` for an
 orchestrator returning a failed step, which the current public projection maps
 to `succeeded`. Both observations are retained explicitly. This controlled fault
 does not establish the cause of any earlier public 503 or certify receivers.
+
+### Inspect smoke evidence before recovery
+
+The hosted workflow uploads safe reports under `runtime-smoke-evidence` before
+removing its owned registry and kind cluster. Use the
+[evidence selection and failure-correlation procedure](../../developers/workflow-resume-subscriptions.md#choose-the-correct-evidence)
+to distinguish readiness diagnostics, ordinary lifecycle/cancellation evidence,
+and controlled-failure evidence. A missing report can mean an earlier step
+failed or the producing step was skipped; it is not a passing result.
+
+For ordinary cancellation, require the registered, unexpired `PT5M` wait with
+exact 300-second TTL, independent runtime `RUNNING` before the real Trigger-signed
+cancel, runtime `TERMINATED`, unchanged accepted-input digest and matching public
+`cancelled` readback. HTTP 202 or `cancelling` alone is insufficient. Keep that
+proof separate from the controlled run's domain `failed` outcome, even if its
+runtime/public projections say `completed`/`succeeded`.
+
+Retain only validated structured metadata in issue checkpoints, never raw
+credentials, payloads or diagnostic logs. Preserve the exact run/source/artifact
+identity and verify cleanup of only the owned resources. Do not retry a failed
+smoke, change rollout defaults, or infer a historical 503 cause from a later
+success. Follow the approved run cap and
+[safe recovery gate](../../developers/workflow-resume-subscriptions.md#controlled-failure-and-safe-recovery);
+receiver certification and unresolved repair acceptance remain separate.
+
 For a managed/remote cluster, follow
 [Install — connected](install-connected.md) instead; this page is the local
 variant of the same flow.

@@ -123,6 +123,42 @@ modify SDK timestamps. The
 checks first persistence, history replay and the unchanged execution pin without
 opening RPC channels. This is local causal evidence, not deployed certification.
 
+#### Choose the correct evidence
+
+The [deployment smoke workflow](../../.github/workflows/deploy-smoke.yml)
+uploads existing safe reports as `runtime-smoke-evidence` before owned cleanup,
+including on failure. Download the artifact from the **exact run and attempt**,
+not an unrelated green run. Use a new directory owned by this investigation:
+
+```bash
+gh run download "$RUN_ID" --repo toddysm/custos \
+  --name runtime-smoke-evidence --dir "$EVIDENCE_DIR"
+```
+
+Set `RUN_ID` to the approved run and `EVIDENCE_DIR` to that directory before
+running the command. Preserve artifact identity, report hashes and tested source
+before the artifact expires under the repository's Actions retention policy.
+The upload step warns if no files exist; an upload warning or missing file is
+not successful verification.
+
+| Report | Meaning when present |
+|---|---|
+| `runtime-evidence.json` | Successful scheduler/dependency readiness, not public lifecycle or receiver certification. |
+| `runtime-readiness-diagnostics.json` | Failed readiness probe and safe collection evidence. |
+| `public-workflow-evidence.json` | Completed ordinary public lifecycle, live wait and signed cancellation proof. |
+| `public-workflow-diagnostics.json` | Failure in the ordinary lifecycle/cancellation proof; inspect `failedPhase` and collection gaps. |
+| `controlled-failure-evidence.json` | Successful verification of the deliberately failed wait, not a cancellation outcome or historical-503 correction. |
+| `controlled-failure-diagnostics.json` | Diagnostics for the separate controlled proof, including its expected failed step or a failed proof attempt. |
+
+The controlled step runs after the ordinary lifecycle step. If an earlier step
+fails, the controlled step can be skipped and its files absent. Conversely, a
+green controlled proof deliberately retains `diagnosticOnly: true` and
+`lifecycleProofFailed: true` for the injected run. Those fields do not turn the
+ordinary lifecycle proof or overall job into a failure. Keep both diagnostic
+filenames separate; neither may overwrite the other.
+
+#### Correlate a failed proof
+
 For a failed deployed proof:
 
 1. Retain `runtime-smoke-evidence` before the disposable cluster is removed.
@@ -175,6 +211,9 @@ For a failed deployed proof:
 2. Correlate the candidate UUID and step with `WORKFLOW_RESUME_FAILURE` records.
    `phase: generator` covers lazy handler failures before effect dispatch;
    `operation: unknown` means no effect has yet identified an operation.
+   When present, `taskId`, `attempt`, `operation` and `phase` locate the failed
+   effect or retry within that same run and step; they are not globally unique
+   operation identities. Source frames alone do not establish that association.
    Activity, final retry and driver records retain their original exception,
    timers and durable inputs. Replay suppresses duplicate source diagnostics.
 3. If the first public POST fails before returning a run ID, match its validated
@@ -202,6 +241,10 @@ For a failed deployed proof:
    collector failure is explicit and cannot replace the original proof failure.
    Metadata diagnostics use `fetch_payloads=False`; an unsupported history API
    or null failure details is a limitation, not evidence of an absent error.
+   Collection samples the last 300 lines from each selected Gateway/Auth/Workflow
+   deployment container and sidecar, including Ready services. Records outside
+   that sample or from another replica may be absent. An empty `collectionErrors`
+   does not prove complete log coverage or establish an otherwise missing cause.
 6. Record source/tested merge/image/run identities and exact owned cleanup.
    Follow the approved run cap and stop for authorization after a failed final
    verification; do not dispatch another diagnostic run automatically.
@@ -220,6 +263,47 @@ snapshot's SHA-256 before and after cancellation, retaining only the digest and
 verification flags; neither database access nor snapshot contents reach the
 public client.
 Receiver/recovery/replay/isolation certification remains a separate gate.
+
+#### Controlled failure and safe recovery
+
+The separate controlled proof requires the injected wait's domain outcome
+`failed`, `step.resume_delivery_failed`, and matching causal diagnostics for
+`await-cancellation`, `operation: wait`, `phase: driver`, with a structured
+`ValueError` and nonempty bounded source frames. It also requires unchanged
+accepted input, mirror removal and no collection errors. The private SDK probe
+reads the outcome for this assertion; it does not publish raw output or payloads.
+Synthetic marker exclusion is a regression check, not a guarantee that arbitrary
+raw logs are safe to share.
+
+The runtime can report `completed` when an orchestrator returns a failed step;
+the current public projection can report `succeeded` for that same controlled
+run. Retain `runtimeStatus`, `stepOutcome`, `failureKind` and `publicStatus`
+separately. Neither runtime completion nor this public projection proves domain
+success, actual cancellation, or the cause of an earlier public 503.
+
+For a failed or uncertain ordinary start, retain the original idempotency key,
+caller, workspace and request content. Inspect supported public GET/list readback
+when a confirmed run identity is available; `attemptedRunId` alone is not one.
+Do not blindly retry POST, invent a replacement identity, cancel an unconfirmed
+candidate, or treat a fresh invalid-input `422` as an accepted run. The original
+[field-level validation contract](workflow-api.md#caller-bound-public-execution)
+remains distinct from accepted-work `409` conflicts and unavailable-dependency
+`503` responses.
+
+Record actual run results and limitations in the linked issue checkpoints,
+including the source commit, tested checkout/merge, image identities, artifact
+and report hashes, and cleanup evidence. A main dispatch has no synthetic PR
+merge to report. Require evidence upload followed by removal of the exact owned
+registry and cluster/node resources; preserve unrelated local runtimes,
+contexts and credentials. A build/download failure before application deployment
+is not public-start or cancellation evidence, and must not be worked around by
+disabling TLS or other security controls.
+
+Stop at the approved run/publication cap or a missing causal/collection result.
+Further investigation, publication, retry, merge or certification needs its
+own authorization; a passing later run does not reset the cap or close unresolved
+causal work. Do not close documentation or parent repair work while a required
+dependency remains unverified.
 
 ## The `waitFor:` schema
 
